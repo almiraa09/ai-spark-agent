@@ -1,4 +1,28 @@
+import { createServerFn } from "@tanstack/react-start";
 import { supabase } from "../lib/supabase";
+import {
+  saveDailyBrief,
+  getLatestDailyBrief,
+  getDailyBriefByDate,
+  getTodayLocalDateString,
+  type DailyBrief,
+  type DailyTrendingTopic,
+  type DailyNewsItem,
+  type SelectedNewsContext,
+  SELECTED_NEWS_CONTEXT_KEY
+} from "../lib/supabase";
+import { callGeminiApi } from "./gemini";
+
+export {
+  saveDailyBrief,
+  getLatestDailyBrief,
+  getDailyBriefByDate,
+  type DailyBrief,
+  type DailyTrendingTopic,
+  type DailyNewsItem,
+  type SelectedNewsContext,
+  SELECTED_NEWS_CONTEXT_KEY
+};
 
 /**
  * Combo Hybrid News Aggregator Service (10 Countries - 100% Real Live Clickable URLs)
@@ -537,3 +561,484 @@ function formatTimeAgo(isoString: string): string {
   if (diffHours < 24) return `${diffHours} jam lalu`;
   return `${Math.floor(diffHours / 24)} hari lalu`;
 }
+
+// ========================================================
+// Daily News Research Engine (Tahap 2)
+// NewsAPI candidates -> Gemini curation -> 3 topics + 5 news -> saveDailyBrief
+// ========================================================
+
+export interface CandidateNewsArticle {
+  title: string;
+  source: string;
+  url: string;
+  publishedAt: string;
+  description?: string;
+  imageUrl?: string;
+  region?: "Indonesia" | "Global";
+}
+
+export async function fetchCandidateNewsForBrief(options?: {
+  newsApiKey?: string;
+  limit?: number;
+}): Promise<CandidateNewsArticle[]> {
+  const apiKey =
+    options?.newsApiKey ||
+    (typeof import.meta !== "undefined" && import.meta.env?.VITE_NEWS_API_KEY) ||
+    (typeof process !== "undefined" && process.env["NEWS_API_KEY"]) ||
+    "90708b6ef7b44f54b78449c4db95dd6f";
+
+  const candidates: CandidateNewsArticle[] = [];
+  const seenUrls = new Set<string>();
+
+  function addCandidate(art: {
+    title: string;
+    source: string;
+    url: string;
+    publishedAt?: string;
+    description?: string;
+    imageUrl?: string;
+    region?: "Indonesia" | "Global";
+  }) {
+    const title = (art.title || "").trim();
+    const url = (art.url || "").trim();
+    const source = (art.source || "").trim();
+    if (!title || title === "[Removed]" || !url || url.includes("removed.com")) return;
+    const lowerUrl = url.toLowerCase();
+    if (seenUrls.has(lowerUrl)) return;
+    seenUrls.add(lowerUrl);
+
+    candidates.push({
+      title,
+      source: source || "Media",
+      url,
+      publishedAt: art.publishedAt || new Date().toISOString(),
+      description: (art.description || "").trim(),
+      imageUrl: art.imageUrl || undefined,
+      region: art.region || "Indonesia"
+    });
+  }
+
+  // 1. Fetch Indonesian news from NewsAPI
+  if (apiKey) {
+    try {
+      // Query 1A: Indonesian keywords with language=id
+      const queryId = 'instagram OR tiktok OR "media sosial" OR "pemasaran digital" OR "kreator konten" OR "e-commerce" OR bisnis OR UMKM';
+      const urlId = `https://newsapi.org/v2/everything?q=${encodeURIComponent(queryId)}&language=id&sortBy=publishedAt&pageSize=15&apiKey=${apiKey}`;
+      const resId = await fetch(urlId);
+      if (resId.ok) {
+        const dataId = await resId.json();
+        if (dataId.articles && Array.isArray(dataId.articles)) {
+          for (const a of dataId.articles) {
+            addCandidate({
+              title: a.title,
+              source: a.source?.name || "Media Indonesia",
+              url: a.url,
+              publishedAt: a.publishedAt,
+              description: a.description,
+              imageUrl: a.urlToImage,
+              region: "Indonesia"
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Notice fetching Indonesian news from NewsAPI:", err);
+    }
+
+    try {
+      // Query 1B: Indonesian reputable media domains
+      const domains = "kompas.com,detik.com,antaranews.com,kumparan.com,bisnis.com,liputan6.com";
+      const urlDomains = `https://newsapi.org/v2/everything?domains=${domains}&sortBy=publishedAt&pageSize=15&apiKey=${apiKey}`;
+      const resDomains = await fetch(urlDomains);
+      if (resDomains.ok) {
+        const dataDomains = await resDomains.json();
+        if (dataDomains.articles && Array.isArray(dataDomains.articles)) {
+          for (const a of dataDomains.articles) {
+            addCandidate({
+              title: a.title,
+              source: a.source?.name || "Media Indonesia",
+              url: a.url,
+              publishedAt: a.publishedAt,
+              description: a.description,
+              imageUrl: a.urlToImage,
+              region: "Indonesia"
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Notice fetching Indonesian domains from NewsAPI:", err);
+    }
+
+    try {
+      // Query 2: Top Global breakthroughs (TechCrunch, Adweek, Social Media Today, Bloomberg)
+      const queryGlobal = 'instagram OR "social media marketing" OR "meta reels" OR "creator economy"';
+      const domainsGlobal = "techcrunch.com,adweek.com,socialmediatoday.com,bloomberg.com";
+      const urlGlobal = `https://newsapi.org/v2/everything?q=${encodeURIComponent(queryGlobal)}&domains=${domainsGlobal}&sortBy=publishedAt&pageSize=10&apiKey=${apiKey}`;
+      const resGlobal = await fetch(urlGlobal);
+      if (resGlobal.ok) {
+        const dataGlobal = await resGlobal.json();
+        if (dataGlobal.articles && Array.isArray(dataGlobal.articles)) {
+          for (const a of dataGlobal.articles) {
+            addCandidate({
+              title: a.title,
+              source: a.source?.name || "Global Media",
+              url: a.url,
+              publishedAt: a.publishedAt,
+              description: a.description,
+              imageUrl: a.urlToImage,
+              region: "Global"
+            });
+          }
+        }
+      }
+    } catch (err) {
+      console.warn("Notice fetching Global news from NewsAPI:", err);
+    }
+  }
+
+  // 3. Always supplement with verified Indonesian marketing news from isolated dataset
+  // Guarantees high-quality real Indonesian marketing news are always available as candidates
+  const idConfig = SUPPORTED_COUNTRIES.find((c) => c.code === "ID") || SUPPORTED_COUNTRIES[1];
+  if (idConfig) {
+    const verifiedIdNews = getStrictIsolatedNewsForCountry(idConfig, "");
+    for (const art of verifiedIdNews) {
+      addCandidate({
+        title: art.title,
+        source: art.source,
+        url: art.url,
+        publishedAt: new Date().toISOString(),
+        description: art.excerpt,
+        imageUrl: undefined, // Do not inject random/placeholder images into Daily Brief candidates
+        region: "Indonesia"
+      });
+    }
+  }
+
+  if (candidates.length < 5) {
+    throw new Error(`NewsAPI returned insufficient valid candidates (${candidates.length} valid articles, minimum 5 required).`);
+  }
+
+  return candidates;
+}
+
+export function validateDailyBriefData(
+  parsed: any,
+  candidates: CandidateNewsArticle[]
+): { topics: DailyTrendingTopic[]; news_items: DailyNewsItem[] } {
+  if (!parsed || typeof parsed !== "object") {
+    throw new Error("Validation failed: Curated data is not an object.");
+  }
+
+  // 1. Validate topics: EXACTLY 3 items
+  if (!Array.isArray(parsed.topics)) {
+    throw new Error("Validation failed: 'topics' is not an array.");
+  }
+  if (parsed.topics.length !== 3) {
+    throw new Error(`Validation failed: 'topics' must have exactly 3 items (received ${parsed.topics.length}).`);
+  }
+
+  const topicNames = new Set<string>();
+  const validatedTopics: DailyTrendingTopic[] = [];
+
+  for (let i = 0; i < parsed.topics.length; i++) {
+    const t = parsed.topics[i];
+    const rank = String(t.rank || `0${i + 1}`).trim();
+    const topic = String(t.topic || "").trim();
+    const growth = String(t.growth || "+50%").trim();
+    const tag = String(t.tag || "Trends").trim();
+    const region = t.region ? String(t.region).trim() : "Indonesia";
+
+    if (!topic) {
+      throw new Error(`Validation failed: Topic at index ${i} has empty 'topic' name.`);
+    }
+
+    const lower = topic.toLowerCase();
+    if (topicNames.has(lower)) {
+      throw new Error(`Validation failed: Duplicate topic '${topic}' detected.`);
+    }
+    topicNames.add(lower);
+
+    validatedTopics.push({ rank, topic, growth, tag, region });
+  }
+
+  // 2. Validate news_items: EXACTLY 5 items
+  if (!Array.isArray(parsed.news_items)) {
+    throw new Error("Validation failed: 'news_items' is not an array.");
+  }
+  if (parsed.news_items.length !== 5) {
+    throw new Error(`Validation failed: 'news_items' must have exactly 5 items (received ${parsed.news_items.length}).`);
+  }
+
+  const normalizeUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, "");
+  const candidateUrlMap = new Map<string, CandidateNewsArticle>();
+  for (const c of candidates) {
+    candidateUrlMap.set(c.url.trim().toLowerCase(), c);
+    candidateUrlMap.set(normalizeUrl(c.url), c);
+  }
+
+  const newsUrls = new Set<string>();
+  const newsTitles = new Set<string>();
+  const validatedNews: DailyNewsItem[] = [];
+
+  for (let i = 0; i < parsed.news_items.length; i++) {
+    const n = parsed.news_items[i];
+    const title = String(n.title || "").trim();
+    const rawUrl = String(n.url || "").trim();
+    const source = String(n.source || "").trim();
+    const publishedAt = String(n.published_at || n.publishedAt || "").trim();
+    const topic = n.topic ? String(n.topic).trim() : validatedTopics[i % 3].tag;
+    const summary = String(n.summary || n.excerpt || "").trim();
+    const readTime = n.read_time ? String(n.read_time).trim() : "3 min";
+    const region = n.region ? String(n.region).trim() : undefined;
+
+    if (!title) {
+      throw new Error(`Validation failed: News item at index ${i} has empty title.`);
+    }
+    if (!rawUrl || !rawUrl.startsWith("http")) {
+      throw new Error(`Validation failed: News item at index ${i} ('${title}') has invalid or empty URL ('${rawUrl}').`);
+    }
+    if (!source) {
+      throw new Error(`Validation failed: News item at index ${i} ('${title}') has empty source.`);
+    }
+
+    const lowerUrl = rawUrl.toLowerCase();
+    if (newsUrls.has(lowerUrl)) {
+      throw new Error(`Validation failed: Duplicate news URL '${rawUrl}' detected.`);
+    }
+    newsUrls.add(lowerUrl);
+
+    const lowerTitle = title.toLowerCase();
+    if (newsTitles.has(lowerTitle)) {
+      throw new Error(`Validation failed: Duplicate news title '${title}' detected.`);
+    }
+    newsTitles.add(lowerTitle);
+
+    const matchedCandidate = candidateUrlMap.get(lowerUrl) || candidateUrlMap.get(normalizeUrl(rawUrl));
+
+    // Only accept authentic HTTP/HTTPS image URLs, never placeholders or random strings
+    const candidateRawImg = matchedCandidate?.imageUrl || n.image_url || n.imageUrl;
+    let imageUrl: string | undefined = undefined;
+    if (typeof candidateRawImg === "string") {
+      const trimmed = candidateRawImg.trim();
+      if (
+        (trimmed.startsWith("http://") || trimmed.startsWith("https://")) &&
+        !trimmed.toLowerCase().includes("placeholder") &&
+        !trimmed.includes("undefined") &&
+        !trimmed.includes("null")
+      ) {
+        imageUrl = trimmed;
+      }
+    }
+
+    const resolvedRegion = region || matchedCandidate?.region || "Indonesia";
+
+    validatedNews.push({
+      id: `daily-news-${Date.now()}-${i + 1}`,
+      title,
+      source: source || matchedCandidate?.source || "Media",
+      url: matchedCandidate ? matchedCandidate.url : rawUrl,
+      published_at: publishedAt || matchedCandidate?.publishedAt || new Date().toISOString(),
+      topic,
+      excerpt: summary,
+      summary: summary,
+      region: resolvedRegion,
+      image_url: imageUrl,
+      imageUrl: imageUrl,
+      read_time: readTime
+    });
+  }
+
+  return { topics: validatedTopics, news_items: validatedNews };
+}
+
+export async function curateDailyBriefWithGemini(
+  candidates: CandidateNewsArticle[],
+  options?: { geminiApiKey?: string }
+): Promise<{ topics: DailyTrendingTopic[]; news_items: DailyNewsItem[] }> {
+  const apiKey =
+    options?.geminiApiKey ||
+    (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
+    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_GEMINI_API_KEY as string)) ||
+    (typeof import.meta !== "undefined" && (import.meta.env?.GEMINI_API_KEY as string)) ||
+    "";
+
+  if (!apiKey) {
+    throw new Error("Gemini API key is not configured (GEMINI_API_KEY is missing). Gemini curation requires an active API key.");
+  }
+
+  const systemInstruction = `Anda adalah Editor Berita dan Ahli Strategi Pemasaran Media Sosial Senior untuk InstaSpark AI Helper.
+Tugas Anda adalah mengkurasi Daily Brief yang kredibel, tajam, dan sangat relevan untuk kreator konten dan pemasar digital di Indonesia.
+
+ATURAN UTAMA KURASI (INDONESIA-FIRST):
+1. PRIORITAS WILAYAH:
+   - Target utama: 5 berita harus berfokus pada Indonesia (relevan dengan Instagram, media sosial, pemasaran digital, content creator, e-commerce, UMKM, dan teknologi pemasaran di Indonesia).
+   - Berita global BOLEH masuk MAKSIMAL 2 dari 5 berita, dan HANYA jika benar-benar berita besar/signifikan/booming yang berdampak luas (misalnya peluncuran fitur baru Meta/Instagram, terobosan AI raksasa).
+   - Berita global TIDAK wajib ada (boleh 0 berita global jika tidak ada yang memenuhi kriteria dampak besar, sehingga kelima berita berasal dari Indonesia).
+   - Jangan pernah mengganti berita Indonesia yang relevan hanya demi memasukkan berita global.
+
+2. WAJIB 100% BAHASA INDONESIA:
+   - Semua 'title' (judul berita) WAJIB dalam Bahasa Indonesia yang profesional, menarik, dan informatif.
+   - Semua 'summary' / 'excerpt' WAJIB dalam Bahasa Indonesia (1-2 kalimat padat yang menjelaskan esensi berita dan implikasinya untuk pemasar/kreator).
+   - Jika sumber artikel berbahasa asing (Inggris, Polandia, Spanyol, dll), TERJEMAHKAN dan adaptasikan judul serta ringkasannya ke Bahasa Indonesia yang lugas dan profesional.
+   - Nama entitas, brand, produk, atau tokoh (Instagram, Meta, Reels, TikTok, Shopee, Tokopedia, dll) tetap dipertahankan.
+
+3. INTEGRITAS DATA:
+   - PRESERVE persis nilai 'url', 'source', dan 'published_at' dari kandidat yang dipilih. DILARANG KERAS mengarang, mengubah, atau membuat URL fiktif.
+   - Pilih TEPAT 3 Topik Tren (topics) dengan topik tren utama berfokus pada Indonesia/kawasan.
+   - Pilih TEPAT 5 Berita Industri (news_items).
+
+4. FORMAT OUTPUT:
+   - Kembalikan HANYA format JSON valid tanpa teks pengantar atau penutup.`;
+
+  const simplifiedCandidates = candidates.map((c, i) => ({
+    id: `cand-${i + 1}`,
+    title: c.title,
+    description: c.description,
+    source: c.source,
+    url: c.url,
+    publishedAt: c.publishedAt,
+    region: c.region || "Indonesia"
+  }));
+
+  const prompt = `Berikut adalah daftar kandidat artikel berita:
+${JSON.stringify(simplifiedCandidates, null, 2)}
+
+Kurasi kandidat berita di atas menjadi Daily Brief dengan aturan:
+1. Topik tren (topics): TEPAT 3 topik tren (prioritas Indonesia & regional).
+2. Berita pilihan (news_items): TEPAT 5 berita:
+   - Prioritaskan berita Indonesia (relevan dengan media sosial, pemasaran digital, kreator, UMKM, e-commerce).
+   - Berita global maksimal 2 (boleh 0 jika berita Indonesia sudah kuat atau tidak ada berita global yang sangat penting).
+   - Judul ('title') dan ringkasan ('summary') WAJIB 100% Bahasa Indonesia.
+   - URL dan source HARUS persis sama dengan kandidat yang dipilih.
+
+Format JSON yang HARUS dikembalikan:
+{
+  "topics": [
+    {
+      "rank": "01",
+      "topic": "Nama tren topik utama (Bahasa Indonesia)",
+      "growth": "+XX%",
+      "tag": "Reels / Marketing / AI / dll",
+      "region": "Indonesia / Global"
+    },
+    {
+      "rank": "02",
+      "topic": "Nama tren topik kedua (Bahasa Indonesia)",
+      "growth": "+XX%",
+      "tag": "Growth / Carousel / dll",
+      "region": "Indonesia / Global"
+    },
+    {
+      "rank": "03",
+      "topic": "Nama tren topik ketiga (Bahasa Indonesia)",
+      "growth": "+XX%",
+      "tag": "Strategy / Creator / dll",
+      "region": "Indonesia / Global"
+    }
+  ],
+  "news_items": [
+    {
+      "title": "Judul berita dalam Bahasa Indonesia yang lugas dan profesional",
+      "source": "NAMA PERSIS SOURCE DARI KANDIDAT",
+      "url": "URL PERSIS DARI KANDIDAT",
+      "published_at": "PUBLISHED_AT PERSIS DARI KANDIDAT",
+      "topic": "Kategori relevan",
+      "summary": "Ringkasan 1-2 kalimat dalam Bahasa Indonesia yang menjelaskan esensi berita dan insight untuk pemasar/kreator.",
+      "read_time": "3 min",
+      "region": "Indonesia / Global"
+    }
+  ]
+}
+
+CRITICAL RULES:
+- "topics" must contain EXACTLY 3 items.
+- "news_items" must contain EXACTLY 5 items.
+- "url" of each news item MUST exactly match one of the candidate URLs.
+- Maximum 2 global news items allowed (can be 0 if Indonesia news dominates).
+- All titles and summaries MUST be 100% in Bahasa Indonesia.
+- No duplicate URLs or titles.`;
+
+  const raw = await callGeminiApi({
+    prompt,
+    systemInstruction,
+    temperature: 0.3,
+    apiKey,
+    maxOutputTokens: 2500,
+    timeoutMs: 25000
+  });
+
+  const jsonMatch = raw.match(/\{[\s\S]*\}/);
+  if (!jsonMatch) {
+    throw new Error("Gemini curation failed: Response did not contain a valid JSON object. Raw output: " + raw.slice(0, 200));
+  }
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(jsonMatch[0]);
+  } catch (err: any) {
+    throw new Error(`Gemini curation failed to parse JSON: ${err.message}`);
+  }
+
+  return validateDailyBriefData(parsed, candidates);
+}
+
+export async function generateDailyBrief(options?: {
+  newsApiKey?: string;
+  geminiApiKey?: string;
+  limitCandidates?: number;
+}): Promise<DailyBrief> {
+  // 1. Fetch candidate news from NewsAPI
+  const candidates = await fetchCandidateNewsForBrief({
+    newsApiKey: options?.newsApiKey,
+    limit: options?.limitCandidates || 20
+  });
+
+  // 2. Gemini analyzes and curates candidate news
+  const curated = await curateDailyBriefWithGemini(candidates, {
+    geminiApiKey: options?.geminiApiKey
+  });
+
+  // 3. Save to Supabase / storage with today's brief date
+  const briefDate = getTodayLocalDateString();
+  const saved = await saveDailyBrief({
+    brief_date: briefDate,
+    topics: curated.topics,
+    news_items: curated.news_items
+  });
+
+  return saved;
+}
+
+/**
+ * Server function to generate or refresh the Daily Brief.
+ * Executes on the server using environment API keys (NEWS_API_KEY, GEMINI_API_KEY).
+ * Saves results directly to Supabase table `public.daily_briefs`.
+ */
+export const refreshDailyBriefServerFn = createServerFn({ method: "POST" })
+  .validator((opts?: { force?: boolean }) => opts || {})
+  .handler(async ({ data }): Promise<{ success: boolean; brief?: DailyBrief; error?: string }> => {
+    try {
+      const todayStr = getTodayLocalDateString();
+      if (!data?.force) {
+        // If not forced, check if today's brief already exists in DB
+        const existing = await getDailyBriefByDate(todayStr);
+        if (existing && existing.topics?.length === 3 && existing.news_items?.length === 5) {
+          return { success: true, brief: existing };
+        }
+      }
+
+      const newsApiKey = (typeof process !== "undefined" && process.env?.["NEWS_API_KEY"]) || undefined;
+      const geminiApiKey = (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) || undefined;
+
+      const brief = await generateDailyBrief({
+        newsApiKey,
+        geminiApiKey
+      });
+
+      return { success: true, brief };
+    } catch (err: any) {
+      console.error("refreshDailyBriefServerFn execution error:", err);
+      return { success: false, error: err?.message || "Gagal memperbarui daily brief" };
+    }
+  });

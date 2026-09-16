@@ -1,3 +1,5 @@
+import { createServerFn } from "@tanstack/react-start";
+
 /**
  * Media Services API (Veo 3.1 & Nano Banana / Flash Image Generation)
  * Provides prompt generation, rendering stubs, and exact cost calculations based on PRD specs:
@@ -8,28 +10,62 @@ export interface VideoGenRequest {
   prompt: string;
   durationSeconds: number; // e.g. 8 seconds
   resolution: "720p" | "1080p";
+  contentId?: string;
+  topicTitle?: string;
+  userId?: string;
 }
 
 export interface VideoGenResponse {
   id: string;
-  status: "completed" | "processing";
+  status: "completed" | "processing" | "failed";
   videoUrl: string;
   durationSeconds: number;
   costInUSD: number;
   costInIDR: number;
   formattedCostIDR: string;
+  error?: string;
 }
 
 export interface ImageGenRequest {
   prompt: string;
   aspectRatio: "1:1" | "4:5" | "9:16";
+  contentId?: string;
+  topicTitle?: string;
+  userId?: string;
 }
 
 export interface ImageGenResponse {
   id: string;
-  status: "completed";
+  status: "completed" | "failed";
   imageUrl: string;
   aspectRatio: string;
+  error?: string;
+}
+
+export interface MediaGenServerInput {
+  contentId: string;
+  mediaType: "image" | "video";
+  prompt: string;
+  aspectRatio?: "1:1" | "4:5" | "9:16";
+  durationSeconds?: number;
+  resolution?: "720p" | "1080p";
+  topicTitle?: string;
+  userId?: string;
+}
+
+export interface MediaGenServerOutput {
+  id: string;
+  status: "completed" | "processing" | "failed";
+  mediaUrl: string;
+  videoUrl?: string;
+  imageUrl?: string;
+  mediaType: "image" | "video";
+  durationSeconds?: number;
+  costInUSD?: number;
+  costInIDR?: number;
+  formattedCostIDR?: string;
+  aspectRatio?: string;
+  error?: string;
 }
 
 const VEO_RATE_PER_SECOND_USD = 0.10; // $0.10 / sec as per PRD
@@ -46,42 +82,297 @@ export function calculateVeoVideoCost(durationSeconds: number) {
   };
 }
 
+/**
+ * Server Function for Media Generation (TanStack Start RPC bridge)
+ * Strictly executed on the server.
+ * Uses Google GenAI SDK (@google/genai) with process.env.GEMINI_API_KEY.
+ * Uploads generated media to Supabase Storage bucket 'user_media'.
+ * Enforces Media Gate: contentId must be provided and not empty.
+ */
+export const generateMediaServerFn = createServerFn({ method: "POST" })
+  .validator((data: MediaGenServerInput) => data)
+  .handler(async ({ data }): Promise<MediaGenServerOutput> => {
+    // 1. Enforce Media Gate (contentId must exist and be valid)
+    if (!data.contentId || data.contentId.trim() === "" || data.contentId === "pending-content") {
+      throw new Error("contentId is required for server-side media generation");
+    }
+
+    // 2. Read GEMINI_API_KEY strictly from server process.env
+    const serverKey = (typeof process !== "undefined" && process.env ? process.env.GEMINI_API_KEY : "") || "";
+    if (!serverKey) {
+      return {
+        id: `failed-${Date.now()}`,
+        status: "failed",
+        mediaUrl: "",
+        mediaType: data.mediaType,
+        error: "GEMINI_API_KEY is not configured on the server."
+      };
+    }
+
+    // Dynamic imports for server-side libraries
+    const { GoogleGenAI } = await import("@google/genai");
+    const { createClient } = await import("@supabase/supabase-js");
+
+    const sbUrl = (typeof process !== "undefined" && (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)) || "";
+    const sbKey = (typeof process !== "undefined" && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)) || "";
+    const sb = createClient(sbUrl, sbKey);
+
+    const ai = new GoogleGenAI({ apiKey: serverKey });
+
+    if (data.mediaType === "video") {
+      // ==========================================
+      // REAL VIDEO GENERATION (Google Veo 3.1)
+      // ==========================================
+      const duration = data.durationSeconds || 8;
+      const cost = calculateVeoVideoCost(duration);
+
+      try {
+        console.log(`[Veo 3.1 Server] Requesting video generation for post ${data.contentId}...`);
+
+        let operation = await ai.models.generateVideos({
+          model: "veo-3.1-generate-preview",
+          source: {
+            prompt: data.prompt,
+          },
+          config: {
+            aspectRatio: "9:16",
+            numberOfVideos: 1,
+            resolution: (data.resolution as any) || "720p",
+            durationSeconds: duration as any,
+          }
+        });
+
+        // Polling loop until asynchronous operation completes
+        const pollStart = Date.now();
+        const timeoutMs = 240000; // 4 minutes max
+        while (!operation.done) {
+          if (Date.now() - pollStart > timeoutMs) {
+            throw new Error("Veo video generation timed out after 4 minutes.");
+          }
+          await new Promise((resolve) => setTimeout(resolve, 5000));
+          operation = await ai.operations.getVideosOperation({ operation });
+        }
+
+        const generatedVideo = operation.response?.generatedVideos?.[0]?.video;
+        if (!generatedVideo) {
+          throw new Error("No video returned from Google Veo API.");
+        }
+
+        let videoBuffer: Buffer;
+        if (generatedVideo.videoBytes) {
+          videoBuffer = Buffer.from(generatedVideo.videoBytes, "base64");
+        } else if (generatedVideo.uri) {
+          const downloadUri = `${generatedVideo.uri}${generatedVideo.uri.includes("?") ? "&" : "?"}key=${serverKey}`;
+          const vidFetch = await fetch(downloadUri);
+          if (!vidFetch.ok) {
+            throw new Error(`Failed to download Veo video stream: HTTP ${vidFetch.status}`);
+          }
+          const arrayBuf = await vidFetch.arrayBuffer();
+          videoBuffer = Buffer.from(arrayBuf);
+        } else {
+          throw new Error("Veo response did not contain usable video stream or bytes.");
+        }
+
+        // Upload to Supabase Storage bucket 'user_media'
+        const filePath = `videos/${data.contentId}-${Date.now()}.mp4`;
+        const { error: uploadErr } = await sb.storage.from("user_media").upload(filePath, videoBuffer, {
+          contentType: "video/mp4",
+          upsert: true
+        });
+
+        if (uploadErr) {
+          throw new Error(`Supabase Storage upload error: ${uploadErr.message}`);
+        }
+
+        const { data: pubUrlData } = sb.storage.from("user_media").getPublicUrl(filePath);
+        const publicUrl = pubUrlData.publicUrl;
+
+        // Update content_posts single source of truth
+        await sb.from("content_posts").update({
+          media_url: publicUrl,
+          media_type: "video",
+          updated_at: new Date().toISOString()
+        }).eq("id", data.contentId);
+
+        // Insert record into user_media_library with post_id = contentId
+        await sb.from("user_media_library").insert([{
+          user_id: data.userId || null,
+          post_id: data.contentId,
+          media_type: "video",
+          media_url: publicUrl,
+          title: data.topicTitle ? `Video Reel ${data.topicTitle}` : "Video Reel",
+          prompt: data.prompt,
+          status: "generated"
+        }]);
+
+        return {
+          id: `veo-${Date.now()}`,
+          status: "completed",
+          mediaUrl: publicUrl,
+          videoUrl: publicUrl,
+          mediaType: "video",
+          durationSeconds: duration,
+          costInUSD: cost.costUSD,
+          costInIDR: cost.costIDR,
+          formattedCostIDR: cost.formattedCostIDR,
+        };
+      } catch (err: any) {
+        let errorMsg = err?.message || String(err);
+        try {
+          const parsed = JSON.parse(errorMsg);
+          if (parsed.error?.message) {
+            errorMsg = parsed.error.message;
+          }
+        } catch {}
+        console.error("[Veo 3.1 Server] Error generating video:", errorMsg);
+        return {
+          id: `veo-failed-${Date.now()}`,
+          status: "failed",
+          mediaUrl: "",
+          videoUrl: "",
+          mediaType: "video",
+          durationSeconds: duration,
+          costInUSD: cost.costUSD,
+          costInIDR: cost.costIDR,
+          formattedCostIDR: cost.formattedCostIDR,
+          error: errorMsg,
+        };
+      }
+    } else {
+      // ==========================================
+      // REAL IMAGE GENERATION (Nano Banana: gemini-3.1-flash-image)
+      // ==========================================
+      try {
+        console.log(`[Nano Banana Server] Requesting image generation with gemini-3.1-flash-image for post ${data.contentId}...`);
+        const imgRes = await ai.models.generateContent({
+          model: "gemini-3.1-flash-image",
+          contents: data.prompt,
+          config: {
+            imageConfig: {
+              aspectRatio: data.aspectRatio || "4:5",
+            }
+          }
+        });
+
+        let base64Data = "";
+        let mimeType = "image/png";
+        const parts = imgRes.candidates?.[0]?.content?.parts || [];
+        for (const part of parts) {
+          if (part.inlineData?.data) {
+            base64Data = part.inlineData.data;
+            mimeType = part.inlineData.mimeType || "image/png";
+            break;
+          }
+        }
+
+        if (!base64Data) {
+          throw new Error("Google Gemini API returned no image data for prompt.");
+        }
+
+        const imgBuffer = Buffer.from(base64Data, "base64");
+        const ext = mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
+        const filePath = `images/${data.contentId}-${Date.now()}.${ext}`;
+
+        const { error: uploadErr } = await sb.storage.from("user_media").upload(filePath, imgBuffer, {
+          contentType: mimeType,
+          upsert: true
+        });
+
+        if (uploadErr) {
+          throw new Error(`Supabase Storage upload error: ${uploadErr.message}`);
+        }
+
+        const { data: pubUrlData } = sb.storage.from("user_media").getPublicUrl(filePath);
+        const publicUrl = pubUrlData.publicUrl;
+
+        // Update content_posts single source of truth
+        await sb.from("content_posts").update({
+          media_url: publicUrl,
+          media_type: "image",
+          updated_at: new Date().toISOString()
+        }).eq("id", data.contentId);
+
+        // Insert record into user_media_library with post_id = contentId
+        await sb.from("user_media_library").insert([{
+          user_id: data.userId || null,
+          post_id: data.contentId,
+          media_type: "image",
+          media_url: publicUrl,
+          title: data.topicTitle ? `Gambar ${data.topicTitle}` : "Visual Gambar",
+          prompt: data.prompt,
+          status: "generated"
+        }]);
+
+        return {
+          id: `img-${Date.now()}`,
+          status: "completed",
+          mediaUrl: publicUrl,
+          imageUrl: publicUrl,
+          mediaType: "image",
+          aspectRatio: data.aspectRatio || "4:5",
+        };
+      } catch (err: any) {
+        let errorMsg = err?.message || String(err);
+        try {
+          const parsed = JSON.parse(errorMsg);
+          if (parsed.error?.message) {
+            errorMsg = parsed.error.message;
+          }
+        } catch {}
+        console.error("[Nano Banana Server] Error generating image:", errorMsg);
+        return {
+          id: `img-failed-${Date.now()}`,
+          status: "failed",
+          mediaUrl: "",
+          imageUrl: "",
+          mediaType: "image",
+          aspectRatio: data.aspectRatio || "4:5",
+          error: errorMsg,
+        };
+      }
+    }
+  });
+
 export async function generateVeoVideo(request: VideoGenRequest): Promise<VideoGenResponse> {
   const duration = request.durationSeconds || 8;
   const cost = calculateVeoVideoCost(duration);
 
-  const apiKey =
-    (typeof process !== "undefined" && process.env?.["VEO_API_KEY"]) ||
-    (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
-    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_VEO_API_KEY as string)) ||
-    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_GEMINI_API_KEY as string)) ||
-    "";
+  try {
+    const serverRes = await generateMediaServerFn({
+      data: {
+        contentId: request.contentId || "pending-content",
+        mediaType: "video",
+        prompt: request.prompt,
+        durationSeconds: duration,
+        resolution: request.resolution || "720p",
+        topicTitle: request.topicTitle,
+        userId: request.userId
+      }
+    });
 
-  // Real playable MP4 video streams for Veo 3.1 Reel preview
-  const sampleMp4Videos = [
-    "https://vjs.zencdn.net/v/oceans.mp4",
-    "https://interactive-examples.mdn.mozilla.net/media/cc0-videos/flower.mp4",
-    "https://www.w3schools.com/html/mov_bbb.mp4"
-  ];
-  const promptLower = (request.prompt || "").toLowerCase();
-  let selectedVideoUrl = sampleMp4Videos[0];
-  if (promptLower.includes("bunga") || promptLower.includes("flower")) {
-    selectedVideoUrl = sampleMp4Videos[1];
-  } else if (promptLower.includes("animasi") || promptLower.includes("kartun")) {
-    selectedVideoUrl = sampleMp4Videos[2];
-  } else {
-    selectedVideoUrl = sampleMp4Videos[0];
+    return {
+      id: serverRes.id,
+      status: serverRes.status,
+      videoUrl: serverRes.videoUrl || serverRes.mediaUrl || "",
+      durationSeconds: serverRes.durationSeconds || duration,
+      costInUSD: serverRes.costInUSD ?? cost.costUSD,
+      costInIDR: serverRes.costInIDR ?? cost.costIDR,
+      formattedCostIDR: serverRes.formattedCostIDR || cost.formattedCostIDR,
+      error: serverRes.error
+    };
+  } catch (err: any) {
+    console.warn("Notice in generateVeoVideo calling server function:", err);
+    return {
+      id: `veo-${Date.now()}`,
+      status: "failed",
+      videoUrl: "",
+      durationSeconds: duration,
+      costInUSD: cost.costUSD,
+      costInIDR: cost.costIDR,
+      formattedCostIDR: cost.formattedCostIDR,
+      error: err?.message || "Gagal menghubungi server generator video."
+    };
   }
-
-  return {
-    id: `veo-${Date.now()}`,
-    status: "completed",
-    videoUrl: selectedVideoUrl,
-    durationSeconds: duration,
-    costInUSD: cost.costUSD,
-    costInIDR: cost.costIDR,
-    formattedCostIDR: cost.formattedCostIDR,
-  };
 }
 
 export async function create8SecondReelBlobUrl(imageUrl: string, hookText: string = "Tahukah kamu rahasia dibalik visual sinematik ini?"): Promise<string> {
@@ -268,101 +559,34 @@ export async function triggerDirectDownload(url: string, filename: string = "nan
   }
 }
 
-function translatePromptForImage(prompt: string): string {
-  let p = prompt.toLowerCase().trim();
-  p = p.replace(/^(bikin|buatkan|buat|generate|minta|tolong)\s+(gambar|foto|visual|video|videonya|reel|reels)\s*/i, "");
-  p = p.replace(/^(gambar|foto|visual|video|videonya|reel|reels)\s*/i, "");
-  p = p.replace(/^(tentang|mengenai)\s*/i, "");
-  p = p.trim();
-
-  const translations: Record<string, string> = {
-    buaya: "a detailed realistic crocodile near riverbank, cinematic 4k photo, vertical 9:16",
-    naga: "a mythical majestic dragon with glowing wings, fantasy art 4k photo",
-    kucing: "a cute fluffy cat playing, 4k photo, studio lighting",
-    anjing: "a happy friendly dog running in a park, 4k photo",
-    kopi: "aesthetic hot coffee cup on a wooden cafe table, warm morning sunlight, 4k photo",
-    makanan: "delicious gourmet food plated beautifully, food photography 4k",
-    masak: "chef cooking gourmet dish in kitchen, vibrant studio lighting",
-    baju: "trendy fashion outfit flatlay, aesthetic Instagram style, 4k photo",
-    skincare: "luxurious skincare bottle packaging on marble background, soft studio lighting",
-    mobil: "sleek modern sports car driving on scenic highway at sunset, 4k photo",
-    pantai: "tropical paradise beach with turquoise water and palm trees, golden hour 4k photo",
-    bunga: "beautiful colorful fresh flowers blooming in garden, macro 4k photo",
-    alam: "majestic mountain landscape with river under clear blue sky, 4k photo",
-    fitness: "athletic person training in modern gym, cinematic lighting 4k"
-  };
-
-  for (const [key, val] of Object.entries(translations)) {
-    if (p.includes(key)) {
-      return val;
-    }
-  }
-
-  return `cinematic high quality detailed photo of ${p || "Instagram content"}, 4k resolution, professional composition`;
-}
-
 export async function generateNanoBananaImage(request: ImageGenRequest): Promise<ImageGenResponse> {
-  const apiKey =
-    (typeof process !== "undefined" && process.env?.["IMAGE_GEN_API_KEY"]) ||
-    (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
-    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_IMAGE_GEN_API_KEY as string)) ||
-    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_GEMINI_API_KEY as string)) ||
-    "";
-
-  const englishPrompt = translatePromptForImage(request.prompt || "");
-
-  let width = 1080;
-  let height = 1350;
-  if (request.aspectRatio === "9:16") {
-    width = 720;
-    height = 1280;
-  } else if (request.aspectRatio === "1:1") {
-    width = 1080;
-    height = 1080;
-  }
-
-  if (apiKey) {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 1200);
-
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite-image:generateContent?key=${apiKey}`;
-      const res = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        signal: controller.signal,
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: englishPrompt }] }]
-        })
-      });
-
-      clearTimeout(timer);
-
-      if (res.ok) {
-        const data = await res.json();
-        const base64Img = data.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-        if (base64Img) {
-          return {
-            id: `img-${Date.now()}`,
-            status: "completed",
-            imageUrl: `data:image/jpeg;base64,${base64Img}`,
-            aspectRatio: request.aspectRatio || "4:5",
-          };
-        }
+  try {
+    const serverRes = await generateMediaServerFn({
+      data: {
+        contentId: request.contentId || "pending-content",
+        mediaType: "image",
+        prompt: request.prompt,
+        aspectRatio: request.aspectRatio || "4:5",
+        topicTitle: request.topicTitle,
+        userId: request.userId
       }
-    } catch {
-      // Fall through to clean Flux engine immediately on timeout/error
-    }
+    });
+
+    return {
+      id: serverRes.id,
+      status: (serverRes.status as any) || "completed",
+      imageUrl: serverRes.imageUrl || serverRes.mediaUrl || "",
+      aspectRatio: serverRes.aspectRatio || request.aspectRatio || "4:5",
+      error: serverRes.error
+    };
+  } catch (err: any) {
+    console.warn("Notice in generateNanoBananaImage calling server function:", err);
+    return {
+      id: `img-${Date.now()}`,
+      status: "failed",
+      imageUrl: "",
+      aspectRatio: request.aspectRatio || "4:5",
+      error: err?.message || "Gagal menghubungi server generator gambar."
+    };
   }
-
-  const encodedPrompt = encodeURIComponent(englishPrompt);
-  // Flux model with nologo=true & private=true to guarantee 100% watermark-free output
-  const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${width}&height=${height}&nologo=true&private=true&model=flux&enhance=true`;
-
-  return {
-    id: `img-${Date.now()}`,
-    status: "completed",
-    imageUrl,
-    aspectRatio: request.aspectRatio || "4:5",
-  };
 }

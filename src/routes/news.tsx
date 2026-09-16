@@ -1,72 +1,114 @@
-import { createFileRoute } from "@tanstack/react-router";
-import { ArrowUpRight, Flame, RefreshCw, Globe, Search, Sparkles, Newspaper, X, ChevronDown, Check } from "lucide-react";
+import { createFileRoute, useNavigate } from "@tanstack/react-router";
+import { ArrowRight, Flame, RefreshCw, Globe, Sparkles, Newspaper, AlertCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import {
-  fetchNewsByQueryAndCountry,
-  fetchTrendingTopics,
-  MarketingArticle,
-  SUPPORTED_COUNTRIES,
-  TrendingTopic
+  getLatestDailyBrief,
+  refreshDailyBriefServerFn,
+  type DailyBrief,
+  type DailyNewsItem,
+  type SelectedNewsContext,
+  SELECTED_NEWS_CONTEXT_KEY
 } from "@/services/news-service";
 
 export const Route = createFileRoute("/news")({
   head: () => ({
     meta: [
-      { title: "Marketing Intelligence & Global Feed — Sparky" },
-      { name: "description", content: "Real-time Instagram marketing trends & industry news feed across global markets." },
-      { property: "og:title", content: "Marketing Intelligence — Sparky" },
+      { title: "Daily Marketing Intelligence — Sparky" },
+      { name: "description", content: "Daily brief tren pemasaran Instagram dan berita industri terkurasi." },
+      { property: "og:title", content: "Daily Marketing Intelligence — Sparky" },
     ],
   }),
   component: NewsPage,
 });
 
 export function NewsPage() {
-  const [articles, setArticles] = useState<MarketingArticle[]>([]);
-  const [topics, setTopics] = useState<TrendingTopic[]>([]);
+  const navigate = useNavigate();
+  const [brief, setBrief] = useState<DailyBrief | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selectedNewsId, setSelectedNewsId] = useState<string | null>(null);
 
-  const [selectedCountryCode, setSelectedCountryCode] = useState<string>("GLOBAL");
-  const [showCountryPicker, setShowCountryPicker] = useState(false);
-  const [searchQuery, setSearchQuery] = useState("");
-
-  async function loadCountryNews(code: string = selectedCountryCode, query: string = searchQuery, forceRefresh: boolean = false) {
+  async function loadBrief() {
     setLoading(true);
+    setError(null);
     try {
-      const [newsData, topicData] = await Promise.all([
-        fetchNewsByQueryAndCountry(code, query, forceRefresh),
-        fetchTrendingTopics()
-      ]);
-      setArticles(newsData);
-      setTopics(topicData);
-    } catch (e) {
-      console.error("Failed to load news:", e);
+      const data = await getLatestDailyBrief();
+      setBrief(data);
+    } catch (e: any) {
+      console.error("Failed to load daily brief:", e);
+      setError("Daily brief belum dapat dimuat.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleRefreshBrief() {
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await refreshDailyBriefServerFn({ data: { force: true } });
+      if (res.success && res.brief) {
+        setBrief(res.brief);
+      } else {
+        setError(res.error || "Gagal memperbarui daily brief.");
+      }
+    } catch (e: any) {
+      console.error("Failed to refresh daily brief:", e);
+      setError(e?.message || "Terjadi kesalahan saat memperbarui daily brief.");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    const timer = setTimeout(() => {
-      loadCountryNews(selectedCountryCode, searchQuery, false);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [selectedCountryCode, searchQuery]);
+    loadBrief();
+  }, []);
 
-  function handleSelectCountry(code: string) {
-    setSelectedCountryCode(code);
-    setShowCountryPicker(false);
+  function handleNewsSelect(news: DailyNewsItem) {
+    setSelectedNewsId(news.id);
+    if (typeof window !== "undefined") {
+      const payload: SelectedNewsContext = {
+        id: news.id,
+        title: news.title,
+        source: news.source,
+        url: news.url || "",
+        published_at: news.published_at || "",
+        excerpt: news.excerpt || "",
+        topic: news.topic || "",
+        timestamp: Date.now(),
+      };
+      try {
+        sessionStorage.setItem(SELECTED_NEWS_CONTEXT_KEY, JSON.stringify(payload));
+      } catch (e) {
+        console.warn("Failed to store selected news context:", e);
+      }
+    }
+    navigate({ to: "/" });
   }
 
-  const activeCountryObj = SUPPORTED_COUNTRIES.find((c) => c.code === selectedCountryCode) || SUPPORTED_COUNTRIES[0];
+  function formatPublishedDate(dateStr: string) {
+    if (!dateStr) return "";
+    try {
+      const d = new Date(dateStr);
+      if (!isNaN(d.getTime())) {
+        return d.toLocaleDateString("id-ID", {
+          day: "numeric",
+          month: "short",
+          year: "numeric",
+        });
+      }
+    } catch {}
+    return dateStr;
+  }
 
-  const featuredArticle = articles[0];
-  const secondaryArticles = articles.slice(1);
+  const topics = brief?.topics?.slice(0, 3) || [];
+  const newsItems = brief?.news_items?.slice(0, 5) || [];
+  const hasContent = Boolean(brief && (topics.length > 0 || newsItems.length > 0));
 
   return (
     <main className="page-wrap pb-16">
-      {/* Executive Header */}
+      {/* Executive Header (Mempertahankan Header Existing) */}
       <header className="page-heading">
         <div>
           <div className="inline-flex items-center gap-2 rounded-full border border-primary/20 bg-primary/5 px-3 py-1 text-xs font-semibold text-primary mb-3">
@@ -78,259 +120,270 @@ export function NewsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => loadCountryNews(selectedCountryCode, searchQuery, true)} disabled={loading}>
-            <RefreshCw className={`mr-2 size-3.5 ${loading ? "animate-spin" : ""}`} /> Perbarui Feed
+          <Button variant="outline" size="sm" onClick={handleRefreshBrief} disabled={loading}>
+            <RefreshCw className={`mr-2 size-3.5 ${loading ? "animate-spin" : ""}`} /> Perbarui Brief
           </Button>
         </div>
       </header>
 
-      {/* Compact Single Box Country Selector Bar */}
-      <section className="mb-6 relative">
-        <div className="flex items-center justify-between gap-3 flex-wrap">
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Kawasan Berita:</span>
-
-            <button
-              type="button"
-              className="inline-flex items-center gap-2.5 rounded-xl border border-primary/30 bg-surface-raised px-4 py-2 text-xs font-bold text-foreground shadow-sm transition hover:border-primary focus:outline-none"
-              onClick={() => setShowCountryPicker(!showCountryPicker)}
-            >
-              <span className="text-base">{activeCountryObj.flag}</span>
-              <span>{activeCountryObj.name}</span>
-              <ChevronDown className={`size-3.5 text-muted-foreground transition-transform ${showCountryPicker ? "rotate-180" : ""}`} />
-            </button>
+      {/* Daily Notification Intro Text */}
+      <section className="mb-8">
+        <div className="rounded-2xl border border-primary/20 bg-primary/5 p-4 sm:p-5 flex items-start gap-3.5 text-foreground shadow-xs">
+          <div className="mt-0.5 rounded-xl bg-primary/15 p-2 text-primary shrink-0">
+            <Sparkles className="size-4" />
           </div>
-
-          <span className="tiny-pill text-xs">{articles.length} Berita Ditemukan</span>
+          <div className="text-xs sm:text-sm leading-relaxed">
+            <p className="font-semibold text-foreground">
+              Hai, ini adalah berita dan topik terhangat terbaru yang aku siapkan untuk kamu. Brief ini diperbarui otomatis setiap pagi pukul 08.00.
+            </p>
+            {brief?.brief_date && (
+              <p className="mt-1 text-[11px] text-muted-foreground flex items-center gap-2 flex-wrap font-medium">
+                <span>📅 Edisi: {brief.brief_date}</span>
+                {brief.updated_at && (
+                  <>
+                    <span>•</span>
+                    <span>
+                      🕒 Terakhir diperbarui:{" "}
+                      {new Date(brief.updated_at).toLocaleTimeString("id-ID", {
+                        hour: "2-digit",
+                        minute: "2-digit",
+                      })}{" "}
+                      WIB
+                    </span>
+                  </>
+                )}
+              </p>
+            )}
+          </div>
         </div>
+      </section>
 
-        {/* Backdrop for click outside popup */}
-        {showCountryPicker && (
-          <div className="fixed inset-0 z-20 bg-background/20 backdrop-blur-[1px]" onClick={() => setShowCountryPicker(false)} />
-        )}
+      {/* State Handlers */}
+      {loading ? (
+        <section className="panel p-16 text-center space-y-3">
+          <RefreshCw className="mx-auto size-7 animate-spin text-primary" />
+          <p className="text-sm font-semibold text-foreground">Menyiapkan daily brief...</p>
+          <p className="text-xs text-muted-foreground">Sedang mengambil ringkasan berita pemasaran dan tren terkini.</p>
+        </section>
+      ) : error ? (
+        <section className="panel p-12 text-center space-y-3 border-destructive/20 bg-destructive/5">
+          <AlertCircle className="mx-auto size-7 text-destructive" />
+          <p className="text-sm font-bold text-foreground">{error}</p>
+          <p className="text-xs text-muted-foreground max-w-md mx-auto">
+            Terjadi kendala saat memuat data Daily Brief terbaru.
+          </p>
+          <Button variant="outline" size="sm" onClick={handleRefreshBrief} disabled={loading} className="rounded-full text-xs">
+            Coba Lagi
+          </Button>
+        </section>
+      ) : !hasContent ? (
+        <section className="panel p-12 text-center space-y-3">
+          <Newspaper className="mx-auto size-8 text-muted-foreground" />
+          <p className="text-sm font-bold text-foreground">Daily brief belum tersedia.</p>
+          <p className="text-xs text-muted-foreground max-w-md mx-auto">
+            Brief harian belum dibuat untuk hari ini. Brief diperbarui otomatis setiap pagi pukul 08.00.
+          </p>
+          <Button variant="outline" size="sm" onClick={handleRefreshBrief} disabled={loading} className="rounded-full text-xs">
+            <RefreshCw className={`mr-1.5 size-3.5 ${loading ? "animate-spin" : ""}`} /> Perbarui Brief
+          </Button>
+        </section>
+      ) : (
+        <>
+          {/* Section 1: Trending Topics (Tepat 3 Topik) */}
+          <section className="mb-10">
+            <div className="flex items-center gap-2 mb-3">
+              <Flame className="size-4 text-primary" />
+              <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                Topik Diskusi Terhangat Hari Ini (3 Tren Utama)
+              </h2>
+            </div>
+            <div className="grid gap-3.5 sm:grid-cols-3">
+              {topics.map((item, idx) => (
+                <div
+                  key={item.rank || idx}
+                  className="panel flex flex-col justify-between border-primary/20 hover:border-primary/50 transition p-4 sm:p-5 shadow-2xs"
+                >
+                  <div>
+                    <div className="mb-2.5 flex items-center justify-between">
+                      <span className="tiny-pill border-0 bg-primary/10 text-primary font-bold">
+                        {item.tag || "Trends"}
+                      </span>
+                      <span className="font-display text-xs font-bold text-muted-foreground">
+                        {item.rank || `0${idx + 1}`}
+                      </span>
+                    </div>
+                    <h3 className="text-xs sm:text-sm font-bold leading-snug text-foreground">
+                      {item.topic}
+                    </h3>
+                  </div>
+                  <div className="mt-4 border-t border-border/60 pt-2.5 flex items-center justify-between text-[11px]">
+                    <span className="font-bold text-emerald-600 dark:text-emerald-400">{item.growth}</span>
+                    {item.region && (
+                      <span className="text-muted-foreground flex items-center gap-1 text-[10px]">
+                        <Globe className="size-3" /> {item.region}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </section>
 
-        {/* Sleek Popup Grid Dropdown for 10 Countries */}
-        {showCountryPicker && (
-          <div className="absolute left-0 top-12 z-30 w-full max-w-md rounded-2xl border border-border bg-surface-raised p-4 shadow-2xl animate-in fade-in zoom-in-95">
-            <div className="flex items-center justify-between border-b border-border pb-2 mb-3">
-              <span className="text-xs font-bold text-primary flex items-center gap-1.5">
-                <Globe className="size-3.5" /> Pilih Negara Berita (10 Negara)
-              </span>
-              <button className="text-xs text-muted-foreground hover:text-foreground p-1" onClick={() => setShowCountryPicker(false)}>
-                ✕
-              </button>
+          {/* Section 2: News Feed (List Vertikal Tepat 5 Berita) */}
+          <section className="space-y-4">
+            <div className="flex items-center gap-2 mb-1">
+              <Newspaper className="size-4 text-primary" />
+              <h2 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                Berita Industri Pilihan Hari Ini (5 Berita Terkini)
+              </h2>
             </div>
 
-            <div className="grid grid-cols-2 gap-2 max-h-64 overflow-y-auto pr-1">
-              {SUPPORTED_COUNTRIES.map((c) => {
-                const isSelected = selectedCountryCode === c.code;
+            <div className="space-y-3.5">
+              {newsItems.map((news, index) => {
+                const isSelected = selectedNewsId === news.id;
                 return (
-                  <button
-                    key={c.code}
-                    type="button"
-                    className={`flex items-center justify-between rounded-xl px-3 py-2 text-xs font-semibold transition ${
-                      isSelected ? "bg-primary text-primary-foreground shadow-sm" : "bg-background text-foreground hover:bg-muted"
+                  <div
+                    key={news.id || index}
+                    className={`panel group relative flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 sm:p-5 transition hover:border-primary/50 hover:shadow-sm ${
+                      isSelected ? "border-primary bg-primary/5" : ""
                     }`}
-                    onClick={() => handleSelectCountry(c.code)}
                   >
-                    <span className="flex items-center gap-2">
-                      <span className="text-base">{c.flag}</span>
-                      <span className="truncate max-w-[110px]">{c.name}</span>
-                    </span>
-                    {isSelected && <Check className="size-3.5 shrink-0" />}
-                  </button>
+                    {/* Left Index & Details */}
+                    <div className="flex items-start gap-3.5 sm:gap-4 flex-1 min-w-0">
+                      <div className="flex flex-col items-center justify-center shrink-0 pt-0.5">
+                        <span className="text-[10px] font-extrabold text-primary tracking-wider uppercase bg-primary/10 rounded-md px-2 py-1">
+                          NEWS 0{index + 1}
+                        </span>
+                      </div>
+
+                      <div className="space-y-1.5 min-w-0 flex-1">
+                        <div className="flex items-center gap-2 flex-wrap text-[11px] text-muted-foreground">
+                          <span className="font-bold text-foreground">{news.source}</span>
+                          {news.topic && (
+                            <>
+                              <span>•</span>
+                              <span className="font-semibold text-primary">{news.topic}</span>
+                            </>
+                          )}
+                          {news.published_at && (
+                            <>
+                              <span>•</span>
+                              <span>{formatPublishedDate(news.published_at)}</span>
+                            </>
+                          )}
+                          {news.read_time && (
+                            <>
+                              <span>•</span>
+                              <span>{news.read_time}</span>
+                            </>
+                          )}
+                        </div>
+
+                        <a
+                          href={news.url}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="block font-bold text-xs sm:text-sm leading-snug text-foreground group-hover:text-primary transition line-clamp-2"
+                        >
+                          {news.title}
+                        </a>
+
+                        {news.excerpt && (
+                          <p className="text-xs text-muted-foreground leading-relaxed line-clamp-2">
+                            {news.excerpt}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Right: Thumbnail + Arrow Button */}
+                    <div className="flex items-center justify-between sm:justify-end gap-3.5 w-full sm:w-auto shrink-0 pt-2 sm:pt-0 border-t sm:border-t-0 border-border/40">
+                      <NewsCardThumbnail
+                        url={news.image_url || (news as any).imageUrl}
+                        title={news.title}
+                        articleUrl={news.url}
+                      />
+                      <Button
+                        type="button"
+                        variant={isSelected ? "default" : "outline"}
+                        size="sm"
+                        onClick={() => handleNewsSelect(news)}
+                        className="rounded-full size-9 p-0 flex items-center justify-center border-primary/30 text-primary hover:bg-primary hover:text-primary-foreground transition-all group-hover:scale-105 shrink-0"
+                        title="Diskusikan berita ini dengan Sparky AI Agent"
+                      >
+                        <ArrowRight className="size-4" />
+                      </Button>
+                    </div>
+                  </div>
                 );
               })}
             </div>
-          </div>
-        )}
-      </section>
-
-      {/* Search Input Bar with Live Dynamic Fetching */}
-      <section className="mb-8">
-        <div className="relative max-w-md">
-          <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 size-4 text-muted-foreground" />
-          <Input
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder={`Cari topik ceruk brand (misal: fashion, kuliner, skincare, Reels, AI)...`}
-            className="pl-10 pr-10 text-xs rounded-full bg-surface-raised border-border"
-          />
-          {searchQuery && (
-            <button onClick={() => setSearchQuery("")} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground">
-              <X className="size-4" />
-            </button>
-          )}
-        </div>
-        {searchQuery && (
-          <div className="mt-2 flex items-center gap-2 text-[11px] font-medium text-primary">
-            <span>Menampilkan pencarian live topik <strong>"{searchQuery}"</strong> di kawasan {activeCountryObj.flag} {activeCountryObj.name}</span>
-            <button onClick={() => setSearchQuery("")} className="text-xs text-muted-foreground hover:text-destructive underline">
-              Bersihkan
-            </button>
-          </div>
-        )}
-      </section>
-
-      {/* Trending Topics Grid */}
-      <section className="mb-10">
-        <div className="flex items-center gap-2 mb-3">
-          <Flame className="size-4 text-primary" />
-          <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">Topik Diskusi Terhangat (Klik untuk Cari)</p>
-        </div>
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {topics.map((item) => (
-            <button
-              key={item.rank}
-              type="button"
-              onClick={() => setSearchQuery(item.tag)}
-              className="panel text-left flex flex-col justify-between border-primary/20 hover:border-primary/60 hover:shadow-sm transition cursor-pointer group"
-            >
-              <div>
-                <div className="mb-3 flex items-center justify-between">
-                  <span className="tiny-pill border-0 bg-primary/10 text-primary font-bold group-hover:bg-primary group-hover:text-primary-foreground transition">{item.tag}</span>
-                  <span className="font-display text-xs font-semibold text-muted-foreground">{item.rank}</span>
-                </div>
-                <h3 className="text-xs font-bold leading-snug group-hover:text-primary transition">{item.topic}</h3>
-              </div>
-              <div className="mt-4 border-t border-border/60 pt-3 flex items-center justify-between text-[11px]">
-                <span className="font-bold text-success">{item.growth} pembicaraan</span>
-                <span className="text-muted-foreground flex items-center gap-1">
-                  <Globe className="size-3" /> {item.region}
-                </span>
-              </div>
-            </button>
-          ))}
-        </div>
-      </section>
-
-      {/* Articles Feed */}
-      {loading ? (
-        <div className="panel p-16 text-center">
-          <RefreshCw className="mx-auto size-8 animate-spin text-primary mb-3" />
-          <p className="text-sm font-medium text-muted-foreground">Memuat berita marketing terkini dari {activeCountryObj.flag} {activeCountryObj.name}...</p>
-        </div>
-      ) : (
-        <section className="space-y-8">
-          {/* Featured Headline Article */}
-          {featuredArticle && !searchQuery && (
-            <a
-              href={featuredArticle.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="group panel grid gap-6 md:grid-cols-2 overflow-hidden p-0 transition hover:border-primary/50 shadow-sm"
-            >
-              {featuredArticle.imageUrl && (
-                <div className="relative min-h-[240px] w-full overflow-hidden bg-muted">
-                  <img
-                    src={featuredArticle.imageUrl}
-                    alt={featuredArticle.title}
-                    className="h-full w-full object-cover transition-transform duration-500 group-hover:scale-105"
-                    onError={(e) => {
-                      const target = e.target as HTMLImageElement;
-                      if (!target.dataset.fallback) {
-                        target.dataset.fallback = "true";
-                        target.src = "https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=800&auto=format&fit=crop&q=80";
-                      }
-                    }}
-                  />
-                  <div className="absolute top-4 left-4">
-                    <span className="status-badge bg-primary text-primary-foreground font-semibold shadow-md flex items-center gap-1">
-                      <Sparkles className="size-3" /> HEADLINE FEATURED
-                    </span>
-                  </div>
-                </div>
-              )}
-              <div className="flex flex-col justify-between p-6 sm:p-8">
-                <div>
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="text-xs font-bold text-primary">{featuredArticle.flag} {featuredArticle.countryName}</span>
-                    <span className="text-xs text-muted-foreground">· {featuredArticle.topic}</span>
-                  </div>
-                  <h2 className="text-lg sm:text-xl font-extrabold leading-snug group-hover:text-primary transition">
-                    {featuredArticle.title}
-                  </h2>
-                  <p className="mt-3 text-xs sm:text-sm leading-relaxed text-muted-foreground">
-                    {featuredArticle.excerpt}
-                  </p>
-                </div>
-                <div className="mt-6 flex items-center justify-between border-t border-border/60 pt-4 text-xs text-muted-foreground">
-                  <span className="font-semibold text-foreground">{featuredArticle.source}</span>
-                  <div className="flex items-center gap-2">
-                    <span>{featuredArticle.time} · {featuredArticle.read} baca</span>
-                    <ArrowUpRight className="size-4 transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />
-                  </div>
-                </div>
-              </div>
-            </a>
-          )}
-
-          {/* Grid of Articles */}
-          <div className="grid gap-5 md:grid-cols-2 lg:grid-cols-3">
-            {(searchQuery ? articles : secondaryArticles).map((art) => (
-              <a
-                key={art.id}
-                href={art.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="group panel flex flex-col justify-between overflow-hidden p-0 transition hover:border-primary/50 hover:shadow-md"
-              >
-                {art.imageUrl && (
-                  <div className="relative h-44 w-full overflow-hidden bg-muted">
-                    <img
-                      src={art.imageUrl}
-                      alt={art.title}
-                      className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
-                      onError={(e) => {
-                        const target = e.target as HTMLImageElement;
-                        if (!target.dataset.fallback) {
-                          target.dataset.fallback = "true";
-                          target.src = "https://images.unsplash.com/photo-1611162617474-5b21e879e113?w=800&auto=format&fit=crop&q=80";
-                        }
-                      }}
-                    />
-                    <div className="absolute top-3 left-3">
-                      <span className="status-badge bg-background/90 text-foreground backdrop-blur-md shadow-sm font-semibold">
-                        {art.flag} {art.countryName}
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex flex-1 flex-col justify-between p-5">
-                  <div>
-                    <span className="text-[11px] font-semibold text-primary">{art.topic}</span>
-                    <h3 className="mt-1.5 text-xs font-bold leading-snug group-hover:text-primary transition line-clamp-2">
-                      {art.title}
-                    </h3>
-                    <p className="mt-2 text-xs leading-relaxed text-muted-foreground line-clamp-3">
-                      {art.excerpt}
-                    </p>
-                  </div>
-
-                  <div className="mt-5 flex items-center justify-between border-t border-border/60 pt-3 text-[11px] text-muted-foreground">
-                    <span className="font-medium truncate max-w-[130px] text-foreground">{art.source}</span>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <span>{art.time}</span>
-                      <ArrowUpRight className="size-3.5 transition group-hover:translate-x-0.5 group-hover:-translate-y-0.5 group-hover:text-primary" />
-                    </div>
-                  </div>
-                </div>
-              </a>
-            ))}
-          </div>
-
-          {articles.length === 0 && (
-            <div className="panel p-12 text-center space-y-3">
-              <Newspaper className="mx-auto size-8 text-muted-foreground" />
-              <p className="text-xs text-muted-foreground">Tidak ada berita yang cocok dengan pencarian "{searchQuery}". Coba kata kunci lain.</p>
-              <Button size="sm" variant="outline" onClick={() => setSearchQuery("")} className="rounded-full text-xs">
-                Bersihkan Pencarian
-              </Button>
-            </div>
-          )}
-        </section>
+          </section>
+        </>
       )}
     </main>
   );
+}
+
+function NewsCardThumbnail({
+  url,
+  title,
+  articleUrl,
+}: {
+  url?: string;
+  title: string;
+  articleUrl?: string;
+}) {
+  const [imageFailed, setImageFailed] = useState(false);
+
+  const cleanUrl = typeof url === "string" ? url.trim() : "";
+  const isValid =
+    Boolean(cleanUrl) &&
+    (cleanUrl.startsWith("http://") || cleanUrl.startsWith("https://")) &&
+    !cleanUrl.toLowerCase().includes("placeholder") &&
+    !cleanUrl.includes("undefined") &&
+    !cleanUrl.includes("null");
+
+  if (!isValid || imageFailed) {
+    return (
+      <div
+        className="w-28 sm:w-36 h-20 sm:h-24 rounded-xl shrink-0 bg-muted/20 border border-border/40 flex flex-col items-center justify-center text-muted-foreground/40 select-none transition-colors group-hover:border-primary/30 group-hover:bg-muted/30"
+        title="Gambar artikel tidak tersedia"
+      >
+        <Newspaper className="size-5 sm:size-6 stroke-[1.25] text-muted-foreground/35" />
+        <span className="text-[9px] sm:text-[10px] mt-1 font-semibold text-muted-foreground/40 tracking-wider uppercase">
+          News
+        </span>
+      </div>
+    );
+  }
+
+  const imageElement = (
+    <div className="relative w-28 sm:w-36 h-20 sm:h-24 rounded-xl overflow-hidden shrink-0 bg-muted/40 border border-border/40 shadow-2xs">
+      <img
+        src={cleanUrl}
+        alt={title}
+        className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
+        loading="lazy"
+        onError={() => setImageFailed(true)}
+      />
+    </div>
+  );
+
+  if (articleUrl) {
+    return (
+      <a
+        href={articleUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="block shrink-0 focus:outline-hidden"
+        title={`Buka artikel: ${title}`}
+        tabIndex={-1}
+      >
+        {imageElement}
+      </a>
+    );
+  }
+
+  return imageElement;
 }

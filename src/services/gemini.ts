@@ -7,6 +7,9 @@ export interface GeminiRequestOptions {
   prompt: string;
   systemInstruction?: string;
   temperature?: number;
+  apiKey?: string;
+  maxOutputTokens?: number;
+  timeoutMs?: number;
 }
 
 export interface GeneratedContentPlan {
@@ -29,6 +32,7 @@ export interface AIAnalysisResult {
 
 export async function callGeminiApi(options: GeminiRequestOptions): Promise<string> {
   const apiKey =
+    options.apiKey ||
     (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
     (typeof import.meta !== "undefined" && (import.meta.env?.VITE_GEMINI_API_KEY as string)) ||
     (typeof import.meta !== "undefined" && (import.meta.env?.GEMINI_API_KEY as string)) ||
@@ -44,7 +48,7 @@ export async function callGeminiApi(options: GeminiRequestOptions): Promise<stri
   for (const model of candidateModels) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 7000);
+      const timer = setTimeout(() => controller.abort(), options.timeoutMs ?? 10000);
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const response = await fetch(url, {
@@ -64,7 +68,7 @@ export async function callGeminiApi(options: GeminiRequestOptions): Promise<stri
           },
           generationConfig: {
             temperature: options.temperature ?? 0.7,
-            maxOutputTokens: 800,
+            maxOutputTokens: options.maxOutputTokens ?? 800,
           }
         })
       });

@@ -1,4 +1,4 @@
-import { generateContentPlanWithAI, GeneratedContentPlan } from "./gemini";
+import { generateContentPlanWithAI, GeneratedContentPlan, callGeminiApi } from "./gemini";
 import { calculateVeoVideoCost } from "./media-services";
 import { savePostToDb, supabase, ContentPostItem, getTodayLocalDateString } from "../lib/supabase";
 
@@ -71,42 +71,81 @@ export async function saveTopicRatios(ratios: TopicRatio[]): Promise<TopicRatio[
   return activeRatios;
 }
 
-export async function generateFourContentOptions(customRatios?: TopicRatio[]): Promise<ContentRecommendationOption[]> {
+export async function generateFourContentOptions(
+  customRatios?: TopicRatio[],
+  newsContext?: string
+): Promise<ContentRecommendationOption[]> {
   const ratios = customRatios || (await getTopicRatios());
   const primaryTopic = ratios[0]?.topicName || "Teknologi & AI";
   const secondaryTopic = ratios[1]?.topicName || "Edukasi & Alam";
   const primaryPct = ratios[0]?.percentage || 75;
   const secondaryPct = ratios[1]?.percentage || 25;
 
-  const apiKey = (typeof process !== "undefined" && process.env["GEMINI_API_KEY"]) || "";
-  if (apiKey) {
-    try {
-      const prompt = `Generate 4 fresh, unique, trending Instagram content ideas based on:
+  try {
+    const contextPrompt = newsContext?.trim()
+      ? `Selected News / Conversation Context:
+"${newsContext.trim()}"
+
+Brand Pillar Ratios:
+- Primary (${primaryPct}%): "${primaryTopic}"
+- Secondary (${secondaryPct}%): "${secondaryTopic}"
+
+Task: Generate 4 fresh, unique, engaging, and trending Instagram content ideas based on the news context above while aligning with the brand pillars.`
+      : `Brand Pillar Ratios:
+- Primary (${primaryPct}%): "${primaryTopic}"
+- Secondary (${secondaryPct}%): "${secondaryTopic}"
+
+Task: Generate 4 fresh, unique, engaging, and trending Instagram content ideas based on:
 Primary (${primaryPct}%): "${primaryTopic}"
-Secondary (${secondaryPct}%): "${secondaryTopic}"
+Secondary (${secondaryPct}%): "${secondaryTopic}"`;
 
-Return JSON array of 4 objects:
-[{"id": "opt-1", "title": "...", "angle": "...", "category": "...", "format": "Reel", "estimatedReach": "45K - 60K Reach", "status": "pending"}]`;
+    const prompt = `${contextPrompt}
 
-      const raw = await callGeminiApi({ prompt, temperature: 0.9 });
-      const match = raw.match(/\[\s*\{[\s\S]*\}\s*\]/);
-      if (match) {
-        const parsed = JSON.parse(match[0]);
-        if (Array.isArray(parsed) && parsed.length >= 4) {
-          return parsed.slice(0, 4).map((item: any, idx: number) => ({
-            id: `opt-${Date.now()}-${idx}`,
-            title: String(item.title),
-            angle: String(item.angle),
-            category: String(item.category || (idx < 2 ? primaryTopic : secondaryTopic)),
-            format: (item.format as any) || (idx % 2 === 0 ? "Reel" : "Carousel"),
-            estimatedReach: String(item.estimatedReach || `${30 + idx * 5}K - ${45 + idx * 5}K Reach`),
-            status: "pending"
-          }));
-        }
+Return a valid JSON array containing EXACTLY 4 objects with this structure:
+[
+  {
+    "id": "opt-1",
+    "title": "Judul konten yang menarik dan relevan dalam Bahasa Indonesia",
+    "angle": "Sudut pandang atau strategi konten yang jelas dalam Bahasa Indonesia",
+    "category": "${primaryTopic}",
+    "format": "Reel",
+    "estimatedReach": "45K - 60K Reach",
+    "status": "pending"
+  }
+]
+
+Guidelines:
+- format must be one of: "Reel", "Carousel", or "Single Post"
+- category should reflect "${primaryTopic}" or "${secondaryTopic}"
+- title & angle must be in attractive Bahasa Indonesia for Instagram
+- estimatedReach format: "XXK - XXK Reach"
+- return ONLY the JSON array without backticks or markdown if possible`;
+
+    const raw = await callGeminiApi({
+      prompt,
+      systemInstruction: "You are Sparky, an expert autonomous Instagram Marketing AI Agent. Generate 4 high-performing Instagram content recommendations. Always return a valid JSON array of 4 recommendation objects.",
+      temperature: 0.8
+    });
+
+    const match = raw.match(/\[\s*\{[\s\S]*\}\s*\]/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      if (Array.isArray(parsed) && parsed.length >= 4) {
+        return parsed.slice(0, 4).map((item: any, idx: number) => ({
+          id: `opt-${Date.now()}-${idx}`,
+          title: String(item.title),
+          angle: String(item.angle),
+          category: String(item.category || (idx < 2 ? primaryTopic : secondaryTopic)),
+          format: (item.format === "Reel" || item.format === "Carousel" || item.format === "Single Post")
+            ? item.format
+            : (idx % 2 === 0 ? "Reel" : "Carousel"),
+          estimatedReach: String(item.estimatedReach || `${30 + idx * 5}K - ${45 + idx * 5}K Reach`),
+          status: "pending" as const
+        }));
       }
-    } catch (e) {
-      console.warn("Gemini dynamic options notice, using dynamic pool generator:", e);
     }
+  } catch (e) {
+    console.warn("Gemini dynamic options notice, using dynamic pool generator:", e);
   }
 
   return generateDynamicPoolOptions(primaryTopic, secondaryTopic, primaryPct, secondaryPct);
@@ -313,7 +352,11 @@ function generateDynamicPoolOptions(
   ];
 }
 
-export async function approveAndGenerateContent(selectedOption: ContentRecommendationOption, userId?: string): Promise<ApprovedContentResult> {
+export async function approveAndGenerateContent(
+  selectedOption: ContentRecommendationOption,
+  userId?: string,
+  existingPostId?: string
+): Promise<ApprovedContentResult> {
   const plan: GeneratedContentPlan = await generateContentPlanWithAI(selectedOption.title);
 
   const durationSec = 8;
@@ -321,22 +364,26 @@ export async function approveAndGenerateContent(selectedOption: ContentRecommend
 
   const todayStr = getTodayLocalDateString();
 
-  const newPostData: Omit<ContentPostItem, "id"> = {
+  const postData: Partial<ContentPostItem> = {
+    ...(existingPostId ? { id: existingPostId } : {}),
     user_id: userId,
     title: selectedOption.title,
+    concept: selectedOption.angle,
     script: plan.script,
     caption: plan.caption,
     hashtags: plan.hashtags,
     image_prompt: plan.imagePrompt,
     video_prompt: plan.videoPrompt,
     veo_duration_seconds: durationSec,
+    veo_cost_usd: veoCost.costUSD,
     veo_cost_idr: veoCost.costIDR,
+    recommended_time: plan.recommendedPostTime || "18:00 WIB",
     scheduled_date: todayStr,
     scheduled_time: "18:00",
     status: "Scheduled"
   };
 
-  const savedPost = await savePostToDb(newPostData);
+  const savedPost = await savePostToDb(postData);
 
   return {
     optionId: selectedOption.id,
@@ -352,5 +399,93 @@ export async function approveAndGenerateContent(selectedOption: ContentRecommend
     formattedVeoCostIDR: veoCost.formattedCostIDR,
     recommendedPostTime: plan.recommendedPostTime || "Jumat, 18:00 WIB",
     savedPostId: savedPost.id
+  };
+}
+
+export interface RevisedContentResult {
+  title: string;
+  concept?: string;
+  script: string;
+  caption: string;
+  hashtags: string[];
+  image_prompt?: string;
+  video_prompt?: string;
+  summaryOfChanges: string;
+}
+
+export async function reviseContentWithAI(
+  currentContent: ContentPostItem,
+  revisionInstruction: string
+): Promise<RevisedContentResult> {
+  const prompt = `Kamu adalah Sparky, asisten AI konsultan pemasaran Instagram.
+Pengguna ingin merevisi draf konten Instagram yang sudah ada.
+
+KONTEN SAAT INI:
+- Judul: ${currentContent.title}
+- Konsep/Angle: ${currentContent.concept || "-"}
+- Skrip Video:
+${currentContent.script}
+- Caption:
+${currentContent.caption}
+- Hashtags: ${(currentContent.hashtags || []).join(" ")}
+- Prompt Visual Image: ${currentContent.image_prompt || "-"}
+- Prompt Video: ${currentContent.video_prompt || "-"}
+
+INSTRUKSI REVISI DARI PENGGUNA:
+"${revisionInstruction}"
+
+ATURAN REVISI:
+1. Revisi HANYA bagian yang diminta secara spesifik oleh pengguna dalam instruksinya.
+2. JANGAN mengubah bagian lain yang TIDAK diminta untuk diubah. Pertahankan teks aslinya secara presisi!
+   - Contoh: Jika pengguna hanya minta "buat caption lebih pendek" atau "ganti caption", ubah HANYA caption. Skrip dan judul TETAP SAMA PERSIS.
+   - Contoh: Jika pengguna minta "revisi script scene 2", ubah bagian skrip yang relevan. Caption dan judul TETAP SAMA PERSIS.
+   - Contoh: Jika pengguna minta "ubah judul jadi lebih santai", ubah HANYA judul. Bagian lain TETAP SAMA PERSIS.
+3. Kembalikan respons dalam format JSON valid berikut tanpa pembungkus markdown apapun di luar JSON:
+{
+  "title": "judul konten",
+  "concept": "konsep/angle",
+  "script": "skrip video scene by scene",
+  "caption": "caption instagram lengkap",
+  "hashtags": ["#tag1", "#tag2"],
+  "imagePrompt": "prompt visual gambar",
+  "videoPrompt": "prompt video",
+  "summaryOfChanges": "Penjelasan ramah 1 kalimat mengenai bagian apa yang baru saja direvisi sesuai permintaan pengguna."
+}`;
+
+  try {
+    const raw = await callGeminiApi({
+      prompt,
+      systemInstruction: "You are Sparky, an expert autonomous Instagram Marketing AI. Always return a valid JSON object matching the requested schema.",
+      temperature: 0.7
+    });
+
+    const match = raw.match(/\{[\s\S]*\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        title: String(parsed.title || currentContent.title),
+        concept: String(parsed.concept || currentContent.concept || ""),
+        script: String(parsed.script || currentContent.script),
+        caption: String(parsed.caption || currentContent.caption),
+        hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags : (currentContent.hashtags || []),
+        image_prompt: parsed.imagePrompt || currentContent.image_prompt,
+        video_prompt: parsed.videoPrompt || currentContent.video_prompt,
+        summaryOfChanges: String(parsed.summaryOfChanges || "Perubahan telah berhasil diterapkan pada konten.")
+      };
+    }
+  } catch (err) {
+    console.warn("Notice in reviseContentWithAI Gemini call, using fallback:", err);
+  }
+
+  // Fallback if AI JSON parse fails
+  return {
+    title: currentContent.title,
+    concept: currentContent.concept,
+    script: currentContent.script,
+    caption: `${currentContent.caption}\n\n(Catatan revisi: ${revisionInstruction})`,
+    hashtags: currentContent.hashtags || [],
+    image_prompt: currentContent.image_prompt,
+    video_prompt: currentContent.video_prompt,
+    summaryOfChanges: `Catatan revisi "${revisionInstruction}" telah ditambahkan ke draf konten.`
   };
 }

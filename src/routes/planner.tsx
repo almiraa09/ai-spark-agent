@@ -175,6 +175,9 @@ export function PlannerPage() {
     setLoading(true);
     try {
       const postToSave = { ...draft, user_id: currentUser?.id };
+      if (!postToSave.id) {
+        delete (postToSave as any).id;
+      }
       const saved = await savePostToDb(postToSave);
       setPosts((prev) => (draft.id ? prev.map((p) => (p.id === draft.id ? saved : p)) : [saved, ...prev]));
       setDraft(null);

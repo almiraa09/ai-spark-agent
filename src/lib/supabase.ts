@@ -7,8 +7,17 @@ import { createClient, SupabaseClient, type User } from "@supabase/supabase-js";
  * SSR-safe with guarded storage helpers.
  */
 
-const envUrl = (typeof import.meta !== "undefined" && import.meta.env?.VITE_SUPABASE_URL) || process.env["VITE_SUPABASE_URL"] || "";
-const envKey = (typeof import.meta !== "undefined" && import.meta.env?.VITE_SUPABASE_ANON_KEY) || process.env["VITE_SUPABASE_ANON_KEY"] || "";
+const envUrl =
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_SUPABASE_URL) ||
+  (typeof process !== "undefined" && (process.env["SUPABASE_URL"] || process.env["VITE_SUPABASE_URL"])) ||
+  "";
+const envKey =
+  (typeof import.meta !== "undefined" && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
+  (typeof process !== "undefined" &&
+    (process.env["SUPABASE_SERVICE_ROLE_KEY"] ||
+      process.env["SUPABASE_ANON_KEY"] ||
+      process.env["VITE_SUPABASE_ANON_KEY"])) ||
+  "";
 
 export const isSupabaseConfigured = Boolean(envUrl && envKey);
 
@@ -460,23 +469,51 @@ export interface ContentPostItem {
   id: string;
   user_id?: string;
   title: string;
+  concept?: string;
   script: string;
   caption: string;
   hashtags: string[];
   image_prompt?: string;
   video_prompt?: string;
   veo_duration_seconds?: number;
+  veo_cost_usd?: number;
   veo_cost_idr?: number;
+  media_url?: string | null;
+  media_type?: "image" | "video" | "carousel" | null;
+  recommended_time?: string;
   scheduled_date: string;
   scheduled_time: string;
+  scheduled_at?: string | null;
+  published_at?: string | null;
   status: "Draft" | "Scheduled" | "Published";
+  created_at?: string;
+  updated_at?: string;
 }
 
-export function getTodayLocalDateString(): string {
-  const d = new Date();
-  const year = d.getFullYear();
-  const month = String(d.getMonth() + 1).padStart(2, "0");
-  const day = String(d.getDate()).padStart(2, "0");
+export function getTodayLocalDateString(dateInput: Date = new Date()): string {
+  try {
+    const formatter = new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Jakarta",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const parts = formatter.formatToParts(dateInput);
+    const year = parts.find((p) => p.type === "year")?.value;
+    const month = parts.find((p) => p.type === "month")?.value;
+    const day = parts.find((p) => p.type === "day")?.value;
+    if (year && month && day) {
+      return `${year}-${month}-${day}`;
+    }
+  } catch (err) {
+    console.warn("Intl timezone formatting notice, falling back to UTC+7 offset:", err);
+  }
+
+  // Fallback: Fixed UTC+7 offset for Asia/Jakarta (WIB)
+  const d = new Date(dateInput.getTime() + 7 * 60 * 60 * 1000);
+  const year = d.getUTCFullYear();
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
   return `${year}-${month}-${day}`;
 }
 
@@ -508,16 +545,25 @@ export async function fetchAllPostsFromDb(userId?: string, email?: string): Prom
           id: String(d.id || crypto.randomUUID()),
           user_id: d.user_id,
           title: String(d.title || ""),
+          concept: d.concept,
           script: String(d.script || ""),
           caption: String(d.caption || ""),
           hashtags: Array.isArray(d.hashtags) ? d.hashtags : [],
           image_prompt: d.image_prompt,
           video_prompt: d.video_prompt,
           veo_duration_seconds: d.veo_duration_seconds,
+          veo_cost_usd: d.veo_cost_usd,
           veo_cost_idr: d.veo_cost_idr,
+          media_url: d.media_url,
+          media_type: d.media_type,
+          recommended_time: d.recommended_time,
           scheduled_date: String(d.scheduled_date || getTodayLocalDateString()),
           scheduled_time: String(d.scheduled_time || "18:00"),
-          status: (d.status as any) || "Draft"
+          scheduled_at: d.scheduled_at,
+          published_at: d.published_at,
+          status: (d.status as any) || "Draft",
+          created_at: d.created_at,
+          updated_at: d.updated_at
         }));
       }
     } catch (err) {
@@ -568,16 +614,95 @@ export async function fetchAllPostsFromDb(userId?: string, email?: string): Prom
   return merged;
 }
 
-export async function savePostToDb(post: Omit<ContentPostItem, "id"> & { id?: string }): Promise<ContentPostItem> {
+export async function savePostToDb(post: Partial<ContentPostItem> & { id?: string; title?: string }): Promise<ContentPostItem> {
   const currentUser = await getCurrentUser();
   const targetUserId = post.user_id || currentUser?.id || "guest";
+  const hasValidId = Boolean(post.id && typeof post.id === "string" && post.id.trim() !== "");
+  const targetPostId = hasValidId ? post.id!.trim() : undefined;
+
+  // If targetPostId is provided, try to fetch existing post to merge fields so nothing is wiped
+  let existing: ContentPostItem | undefined;
+  if (targetPostId) {
+    try {
+      if (supabase && targetUserId !== "guest") {
+        const { data } = await withTimeout(
+          supabase.from("content_posts").select("*").eq("id", targetPostId).maybeSingle(),
+          2000
+        );
+        if (data) {
+          existing = {
+            id: String(data.id),
+            user_id: data.user_id,
+            title: String(data.title || ""),
+            concept: data.concept,
+            script: String(data.script || ""),
+            caption: String(data.caption || ""),
+            hashtags: Array.isArray(data.hashtags) ? data.hashtags : [],
+            image_prompt: data.image_prompt,
+            video_prompt: data.video_prompt,
+            veo_duration_seconds: data.veo_duration_seconds,
+            veo_cost_usd: data.veo_cost_usd,
+            veo_cost_idr: data.veo_cost_idr,
+            media_url: data.media_url,
+            media_type: data.media_type,
+            recommended_time: data.recommended_time,
+            scheduled_date: String(data.scheduled_date || getTodayLocalDateString()),
+            scheduled_time: String(data.scheduled_time || "18:00"),
+            scheduled_at: data.scheduled_at,
+            published_at: data.published_at,
+            status: (data.status as any) || "Draft"
+          };
+        }
+      }
+    } catch {}
+
+    if (!existing) {
+      try {
+        const current = await fetchAllPostsFromDb(targetUserId);
+        existing = current.find((p) => String(p.id) === String(targetPostId));
+      } catch {}
+    }
+  }
+
+  const postId = targetPostId || existing?.id || crypto.randomUUID();
+  const sDate = post.scheduled_date ?? existing?.scheduled_date ?? getTodayLocalDateString();
+  const sTime = post.scheduled_time ?? existing?.scheduled_time ?? "18:00";
+
+  let computedScheduledAt = post.scheduled_at;
+  if (computedScheduledAt === undefined) {
+    if (sDate && sTime) {
+      try {
+        const timeWithSec = sTime.length === 5 ? `${sTime}:00` : sTime;
+        computedScheduledAt = new Date(`${sDate}T${timeWithSec}+07:00`).toISOString();
+      } catch {
+        computedScheduledAt = existing?.scheduled_at || null;
+      }
+    } else {
+      computedScheduledAt = existing?.scheduled_at || null;
+    }
+  }
 
   const newPost: ContentPostItem = {
-    ...post,
-    id: post.id || crypto.randomUUID(),
+    id: postId,
     user_id: targetUserId,
-    scheduled_date: post.scheduled_date || getTodayLocalDateString(),
-    scheduled_time: post.scheduled_time || "18:00"
+    title: post.title ?? existing?.title ?? "Konten Tanpa Judul",
+    concept: post.concept ?? existing?.concept,
+    script: post.script ?? existing?.script ?? "",
+    caption: post.caption ?? existing?.caption ?? "",
+    hashtags: post.hashtags ?? existing?.hashtags ?? [],
+    image_prompt: post.image_prompt ?? existing?.image_prompt,
+    video_prompt: post.video_prompt ?? existing?.video_prompt,
+    veo_duration_seconds: post.veo_duration_seconds ?? existing?.veo_duration_seconds,
+    veo_cost_usd: post.veo_cost_usd ?? existing?.veo_cost_usd,
+    veo_cost_idr: post.veo_cost_idr ?? existing?.veo_cost_idr,
+    media_url: post.media_url !== undefined ? post.media_url : existing?.media_url,
+    media_type: post.media_type !== undefined ? post.media_type : existing?.media_type,
+    recommended_time: post.recommended_time ?? existing?.recommended_time,
+    scheduled_date: sDate,
+    scheduled_time: sTime,
+    scheduled_at: computedScheduledAt,
+    published_at: post.published_at !== undefined ? post.published_at : existing?.published_at,
+    status: post.status ?? existing?.status ?? "Draft"
   };
 
   if (supabase && targetUserId !== "guest") {
@@ -591,11 +716,22 @@ export async function savePostToDb(post: Omit<ContentPostItem, "id"> & { id?: st
           id: String(data.id || newPost.id),
           user_id: data.user_id || targetUserId,
           title: String(data.title || newPost.title),
+          concept: data.concept || newPost.concept,
           script: String(data.script || newPost.script),
           caption: String(data.caption || newPost.caption),
           hashtags: Array.isArray(data.hashtags) ? data.hashtags : newPost.hashtags,
+          image_prompt: data.image_prompt || newPost.image_prompt,
+          video_prompt: data.video_prompt || newPost.video_prompt,
+          veo_duration_seconds: data.veo_duration_seconds ?? newPost.veo_duration_seconds,
+          veo_cost_usd: data.veo_cost_usd ?? newPost.veo_cost_usd,
+          veo_cost_idr: data.veo_cost_idr ?? newPost.veo_cost_idr,
+          media_url: data.media_url !== undefined ? data.media_url : newPost.media_url,
+          media_type: data.media_type !== undefined ? data.media_type : newPost.media_type,
+          recommended_time: data.recommended_time || newPost.recommended_time,
           scheduled_date: String(data.scheduled_date || newPost.scheduled_date),
           scheduled_time: String(data.scheduled_time || newPost.scheduled_time),
+          scheduled_at: data.scheduled_at || newPost.scheduled_at,
+          published_at: data.published_at || newPost.published_at,
           status: (data.status as any) || newPost.status
         };
         try {
@@ -908,6 +1044,7 @@ export async function saveChatMessageToDb(
 export interface UserMediaItem {
   id: string;
   user_id: string;
+  post_id?: string | null;
   media_type: "image" | "video";
   media_url: string;
   title: string;
@@ -935,18 +1072,40 @@ export interface PlannerEventItem {
 
 export async function saveMediaToLibrary(
   userId: string,
-  mediaData: Omit<UserMediaItem, "id" | "created_at" | "user_id">
+  mediaData: Omit<UserMediaItem, "id" | "created_at" | "user_id"> & { id?: string }
 ): Promise<UserMediaItem> {
+  const isValidUUID = (val?: string | null) =>
+    Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
+
   const item: UserMediaItem = {
-    id: `media-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+    id: isValidUUID(mediaData.id) ? (mediaData.id as string) : crypto.randomUUID(),
     user_id: userId,
-    ...mediaData,
-    created_at: new Date().toISOString()
+    post_id: isValidUUID(mediaData.post_id) ? (mediaData.post_id as string) : null,
+    media_type: mediaData.media_type,
+    media_url: mediaData.media_url,
+    title: mediaData.title || "",
+    prompt: mediaData.prompt,
+    created_at: new Date().toISOString(),
+    scheduled_date: mediaData.scheduled_date,
+    status: mediaData.status || "generated",
+    caption: mediaData.caption,
+    hashtags: mediaData.hashtags
   };
 
   if (supabase) {
     try {
-      await withTimeout(supabase.from("user_media_library").insert([item]), 2000);
+      const dbPayload = {
+        id: item.id,
+        user_id: item.user_id,
+        post_id: item.post_id,
+        media_type: item.media_type,
+        media_url: item.media_url,
+        title: item.title,
+        prompt: item.prompt,
+        status: item.status,
+        created_at: item.created_at
+      };
+      await withTimeout(supabase.from("user_media_library").insert([dbPayload]), 2000);
     } catch (err) {
       console.warn("Supabase save media notice:", err);
     }
@@ -1002,6 +1161,80 @@ export async function getUserMediaLibrary(userId: string): Promise<UserMediaItem
   return merged;
 }
 
+export function isValidMediaUrl(url?: string | null): boolean {
+  if (!url || typeof url !== "string") return false;
+  const trimmed = url.trim();
+  if (trimmed.length < 5) return false;
+  if (trimmed.startsWith("blob:") || trimmed.startsWith("data:image/") || trimmed.startsWith("data:video/")) return true;
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
+    const lower = trimmed.toLowerCase();
+    if (lower.includes("example.com") || lower.includes("placeholder.com") || lower.includes("fake-url")) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
+export async function getMediaByPostId(postId: string, userId?: string): Promise<UserMediaItem[]> {
+  if (!postId) return [];
+  let dbItems: UserMediaItem[] = [];
+
+  if (supabase) {
+    try {
+      let query = supabase.from("user_media_library").select("*").eq("post_id", postId);
+      if (userId && userId !== "guest") {
+        query = query.eq("user_id", userId);
+      }
+      const { data, error } = await withTimeout(
+        query.order("created_at", { ascending: false }),
+        2000
+      );
+      if (!error && data) dbItems = data as UserMediaItem[];
+    } catch (err) {
+      console.warn("Supabase fetch media by post_id notice:", err);
+    }
+  }
+
+  let localItems: UserMediaItem[] = [];
+  if (userId) {
+    try {
+      const stored = getLocalItem(`sparky_media_library_${userId}`);
+      if (stored) {
+        const parsed: UserMediaItem[] = JSON.parse(stored);
+        localItems = parsed.filter((m) => m.post_id === postId);
+      }
+    } catch {}
+  }
+
+  const map = new Map<string, UserMediaItem>();
+  dbItems.forEach((i) => map.set(i.id, i));
+  localItems.forEach((i) => {
+    if (!map.has(i.id)) map.set(i.id, i);
+  });
+
+  return Array.from(map.values()).sort(
+    (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+  );
+}
+
+export async function attachMediaToPost(
+  postId: string,
+  mediaUrl: string,
+  mediaType: "image" | "video",
+  userId?: string
+): Promise<ContentPostItem | null> {
+  if (!postId || !isValidMediaUrl(mediaUrl)) {
+    return null;
+  }
+  return savePostToDb({
+    id: postId,
+    user_id: userId,
+    media_url: mediaUrl,
+    media_type: mediaType
+  });
+}
+
 export async function savePlannerEvent(
   userId: string,
   eventData: Omit<PlannerEventItem, "id" | "created_at" | "user_id">
@@ -1013,14 +1246,6 @@ export async function savePlannerEvent(
     created_at: new Date().toISOString()
   };
 
-  if (supabase) {
-    try {
-      await withTimeout(supabase.from("content_planner").insert([item]), 2000);
-    } catch (err) {
-      console.warn("Supabase save planner event notice:", err);
-    }
-  }
-
   try {
     const current = await getPlannerEvents(userId);
     const updated = [item, ...current.filter((e) => e.id !== item.id)];
@@ -1031,42 +1256,240 @@ export async function savePlannerEvent(
 }
 
 export async function getPlannerEvents(userId: string): Promise<PlannerEventItem[]> {
-  let dbEvents: PlannerEventItem[] = [];
-  if (supabase) {
-    try {
-      const { data, error } = await withTimeout(
-        supabase
-          .from("content_planner")
-          .select("*")
-          .eq("user_id", userId)
-          .order("date", { ascending: true }),
-        2000
-      );
-      if (!error && data) dbEvents = data as PlannerEventItem[];
-    } catch (err) {
-      console.warn("Supabase fetch planner events notice:", err);
-    }
-  }
-
   let localEvents: PlannerEventItem[] = [];
   try {
     const stored = getLocalItem(`sparky_planner_${userId}`);
     if (stored) localEvents = JSON.parse(stored);
   } catch {}
 
-  const map = new Map<string, PlannerEventItem>();
-  dbEvents.forEach((e) => map.set(e.id, e));
-  localEvents.forEach((e) => {
-    if (!map.has(e.id)) map.set(e.id, e);
+  return localEvents;
+}
+
+// =========================================
+// 6. Daily News & Daily Brief Types & Storage
+// =========================================
+
+export interface DailyTrendingTopic {
+  rank: string;
+  topic: string;
+  growth: string;
+  tag: string;
+  region?: string;
+}
+
+export interface DailyNewsItem {
+  id: string;
+  title: string;
+  source: string;
+  url: string;
+  published_at: string;
+  topic?: string;
+  excerpt?: string;
+  summary?: string;
+  region?: string;
+  image_url?: string;
+  imageUrl?: string;
+  read_time?: string;
+}
+
+export interface SelectedNewsContext {
+  id: string;
+  title: string;
+  source: string;
+  url?: string;
+  published_at?: string;
+  topic?: string;
+  excerpt?: string;
+  summary?: string;
+  region?: string;
+  image_url?: string;
+  imageUrl?: string;
+  timestamp: number;
+}
+
+export const SELECTED_NEWS_CONTEXT_KEY = "sparky_selected_news_context";
+
+export interface DailyBrief {
+  id: string;
+  brief_date: string; // YYYY-MM-DD
+  topics: DailyTrendingTopic[];
+  news_items: DailyNewsItem[];
+  created_at: string;
+  updated_at: string;
+}
+
+const LOCAL_DAILY_BRIEFS_KEY = "sparky_daily_briefs";
+
+function isValidUuid(str?: string): boolean {
+  if (!str) return false;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str);
+}
+
+function generateUUID(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
   });
+}
 
-  const merged = Array.from(map.values()).sort(
-    (a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()
-  );
+export async function saveDailyBrief(
+  briefData: Omit<DailyBrief, "id" | "created_at" | "updated_at"> & {
+    id?: string;
+    created_at?: string;
+    updated_at?: string;
+  }
+): Promise<DailyBrief> {
+  const now = new Date().toISOString();
+  const validId = isValidUuid(briefData.id) ? briefData.id! : generateUUID();
+  const brief: DailyBrief = {
+    id: validId,
+    brief_date: briefData.brief_date,
+    topics: briefData.topics || [],
+    news_items: briefData.news_items || [],
+    created_at: briefData.created_at || now,
+    updated_at: now,
+  };
 
-  if (merged.length > 0) {
-    setLocalItem(`sparky_planner_${userId}`, JSON.stringify(merged));
+  if (supabase) {
+    try {
+      const { data, error } = await withTimeout(
+        supabase
+          .from("daily_briefs")
+          .upsert(
+            [
+              {
+                id: brief.id,
+                brief_date: brief.brief_date,
+                topics: brief.topics,
+                news_items: brief.news_items,
+                created_at: brief.created_at,
+                updated_at: brief.updated_at,
+              },
+            ],
+            { onConflict: "brief_date" }
+          )
+          .select()
+          .single(),
+        5000
+      );
+      if (!error && data) {
+        brief.id = String(data.id || brief.id);
+        brief.created_at = String(data.created_at || brief.created_at);
+        brief.updated_at = String(data.updated_at || brief.updated_at);
+      } else if (error) {
+        console.warn("Supabase save daily brief error:", error.message);
+      }
+    } catch (err) {
+      console.warn("Supabase save daily brief notice, using local fallback:", err);
+    }
   }
 
-  return merged;
+  // Local Storage fallback & sync
+  try {
+    const raw = getLocalItem(LOCAL_DAILY_BRIEFS_KEY);
+    const existing: DailyBrief[] = raw ? JSON.parse(raw) : [];
+    const filtered = existing.filter((b) => b.brief_date !== brief.brief_date && b.id !== brief.id);
+    const updated = [brief, ...filtered];
+    setLocalItem(LOCAL_DAILY_BRIEFS_KEY, JSON.stringify(updated));
+  } catch (e) {
+    console.warn("LocalStorage save daily brief notice:", e);
+  }
+
+  return brief;
+}
+
+export async function getLatestDailyBrief(): Promise<DailyBrief | null> {
+  if (supabase) {
+    try {
+      const { data, error } = await withTimeout(
+        supabase
+          .from("daily_briefs")
+          .select("*")
+          .order("brief_date", { ascending: false })
+          .order("updated_at", { ascending: false })
+          .limit(1)
+          .maybeSingle(),
+        5000
+      );
+      if (!error && data) {
+        const item: DailyBrief = {
+          id: String(data.id),
+          brief_date: String(data.brief_date),
+          topics: Array.isArray(data.topics) ? data.topics : [],
+          news_items: Array.isArray(data.news_items) ? data.news_items : [],
+          created_at: String(data.created_at || ""),
+          updated_at: String(data.updated_at || ""),
+        };
+        // Sync to local
+        try {
+          const raw = getLocalItem(LOCAL_DAILY_BRIEFS_KEY);
+          const existing: DailyBrief[] = raw ? JSON.parse(raw) : [];
+          const filtered = existing.filter((b) => b.brief_date !== item.brief_date && b.id !== item.id);
+          setLocalItem(LOCAL_DAILY_BRIEFS_KEY, JSON.stringify([item, ...filtered]));
+        } catch {}
+        return item;
+      }
+    } catch (err) {
+      console.warn("Supabase fetch latest daily brief notice, falling back to local:", err);
+    }
+  }
+
+  try {
+    const raw = getLocalItem(LOCAL_DAILY_BRIEFS_KEY);
+    if (raw) {
+      const existing: DailyBrief[] = JSON.parse(raw);
+      if (existing.length > 0) {
+        existing.sort((a, b) => {
+          const dateComp = b.brief_date.localeCompare(a.brief_date);
+          if (dateComp !== 0) return dateComp;
+          return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+        });
+        return existing[0];
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+export async function getDailyBriefByDate(dateStr: string): Promise<DailyBrief | null> {
+  if (supabase) {
+    try {
+      const { data, error } = await withTimeout(
+        supabase
+          .from("daily_briefs")
+          .select("*")
+          .eq("brief_date", dateStr)
+          .maybeSingle(),
+        5000
+      );
+      if (!error && data) {
+        return {
+          id: String(data.id),
+          brief_date: String(data.brief_date),
+          topics: Array.isArray(data.topics) ? data.topics : [],
+          news_items: Array.isArray(data.news_items) ? data.news_items : [],
+          created_at: String(data.created_at || ""),
+          updated_at: String(data.updated_at || ""),
+        };
+      }
+    } catch (err) {
+      console.warn("Supabase fetch daily brief by date notice, falling back to local:", err);
+    }
+  }
+
+  try {
+    const raw = getLocalItem(LOCAL_DAILY_BRIEFS_KEY);
+    if (raw) {
+      const existing: DailyBrief[] = JSON.parse(raw);
+      const found = existing.find((b) => b.brief_date === dateStr);
+      if (found) return found;
+    }
+  } catch {}
+
+  return null;
 }
