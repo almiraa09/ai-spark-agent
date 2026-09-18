@@ -697,26 +697,10 @@ export async function fetchCandidateNewsForBrief(options?: {
     }
   }
 
-  // 3. Always supplement with verified Indonesian marketing news from isolated dataset
-  // Guarantees high-quality real Indonesian marketing news are always available as candidates
-  const idConfig = SUPPORTED_COUNTRIES.find((c) => c.code === "ID") || SUPPORTED_COUNTRIES[1];
-  if (idConfig) {
-    const verifiedIdNews = getStrictIsolatedNewsForCountry(idConfig, "");
-    for (const art of verifiedIdNews) {
-      addCandidate({
-        title: art.title,
-        source: art.source,
-        url: art.url,
-        publishedAt: new Date().toISOString(),
-        description: art.excerpt,
-        imageUrl: undefined, // Do not inject random/placeholder images into Daily Brief candidates
-        region: "Indonesia"
-      });
-    }
-  }
-
-  if (candidates.length < 5) {
-    throw new Error(`NewsAPI returned insufficient valid candidates (${candidates.length} valid articles, minimum 5 required).`);
+  // Candidates are strictly and exclusively sourced from NewsAPI.
+  // No dummy, mock, or isolated fallback dataset is ever injected into the production brief.
+  if (candidates.length === 0) {
+    throw new Error("NewsAPI returned 0 valid candidates. Unable to curate Daily Brief.");
   }
 
   return candidates;
@@ -762,12 +746,9 @@ export function validateDailyBriefData(
     validatedTopics.push({ rank, topic, growth, tag, region });
   }
 
-  // 2. Validate news_items: EXACTLY 5 items
-  if (!Array.isArray(parsed.news_items)) {
-    throw new Error("Validation failed: 'news_items' is not an array.");
-  }
-  if (parsed.news_items.length !== 5) {
-    throw new Error(`Validation failed: 'news_items' must have exactly 5 items (received ${parsed.news_items.length}).`);
+  // 2. Validate news_items: Must be a non-empty array
+  if (!Array.isArray(parsed.news_items) || parsed.news_items.length === 0) {
+    throw new Error("Validation failed: 'news_items' must be a non-empty array.");
   }
 
   const normalizeUrl = (u: string) => u.trim().toLowerCase().replace(/\/+$/, "");
@@ -783,62 +764,70 @@ export function validateDailyBriefData(
 
   for (let i = 0; i < parsed.news_items.length; i++) {
     const n = parsed.news_items[i];
-    const title = String(n.title || "").trim();
-    const rawUrl = String(n.url || "").trim();
-    const source = String(n.source || "").trim();
-    const publishedAt = String(n.published_at || n.publishedAt || "").trim();
-    const topic = n.topic ? String(n.topic).trim() : validatedTopics[i % 3].tag;
-    const summary = String(n.summary || n.excerpt || "").trim();
-    const readTime = n.read_time ? String(n.read_time).trim() : "3 min";
-    const region = n.region ? String(n.region).trim() : undefined;
+    if (!n || typeof n !== "object") continue;
 
-    if (!title) {
-      throw new Error(`Validation failed: News item at index ${i} has empty title.`);
-    }
+    const rawUrl = String(n.url || "").trim();
     if (!rawUrl || !rawUrl.startsWith("http")) {
-      throw new Error(`Validation failed: News item at index ${i} ('${title}') has invalid or empty URL ('${rawUrl}').`);
-    }
-    if (!source) {
-      throw new Error(`Validation failed: News item at index ${i} ('${title}') has empty source.`);
+      console.warn(`[validateDailyBriefData] Rejected item at index ${i}: invalid or missing URL '${rawUrl}'.`);
+      continue;
     }
 
     const lowerUrl = rawUrl.toLowerCase();
-    if (newsUrls.has(lowerUrl)) {
-      throw new Error(`Validation failed: Duplicate news URL '${rawUrl}' detected.`);
+    const normalized = normalizeUrl(rawUrl);
+    const matchedCandidate = candidateUrlMap.get(lowerUrl) || candidateUrlMap.get(normalized);
+
+    // Rule 5: Every curated news item MUST match a candidate NewsAPI URL. If unmatched, REJECT it immediately.
+    if (!matchedCandidate) {
+      console.warn(`[validateDailyBriefData] Rejected news item '${n.title}': URL '${rawUrl}' does not match any candidate NewsAPI article.`);
+      continue;
     }
-    newsUrls.add(lowerUrl);
+
+    const matchedUrlLower = matchedCandidate.url.toLowerCase();
+    if (newsUrls.has(matchedUrlLower)) {
+      console.warn(`[validateDailyBriefData] Rejected duplicate news URL '${matchedCandidate.url}'.`);
+      continue;
+    }
+
+    const title = String(n.title || matchedCandidate.title || "").trim();
+    if (!title) {
+      continue;
+    }
 
     const lowerTitle = title.toLowerCase();
     if (newsTitles.has(lowerTitle)) {
-      throw new Error(`Validation failed: Duplicate news title '${title}' detected.`);
+      console.warn(`[validateDailyBriefData] Rejected duplicate news title '${title}'.`);
+      continue;
     }
-    newsTitles.add(lowerTitle);
 
-    const matchedCandidate = candidateUrlMap.get(lowerUrl) || candidateUrlMap.get(normalizeUrl(rawUrl));
-
-    // Only accept authentic HTTP/HTTPS image URLs, never placeholders or random strings
-    const candidateRawImg = matchedCandidate?.imageUrl || n.image_url || n.imageUrl;
+    // Rule 6: title, source, url, image_url strictly reference the same NewsAPI article.
+    // Image URL is strictly derived from matchedCandidate's urlToImage if authentic HTTP/HTTPS.
     let imageUrl: string | undefined = undefined;
-    if (typeof candidateRawImg === "string") {
-      const trimmed = candidateRawImg.trim();
+    if (typeof matchedCandidate.imageUrl === "string") {
+      const trimmedImg = matchedCandidate.imageUrl.trim();
       if (
-        (trimmed.startsWith("http://") || trimmed.startsWith("https://")) &&
-        !trimmed.toLowerCase().includes("placeholder") &&
-        !trimmed.includes("undefined") &&
-        !trimmed.includes("null")
+        (trimmedImg.startsWith("http://") || trimmedImg.startsWith("https://")) &&
+        !trimmedImg.toLowerCase().includes("placeholder") &&
+        !trimmedImg.includes("undefined") &&
+        !trimmedImg.includes("null")
       ) {
-        imageUrl = trimmed;
+        imageUrl = trimmedImg;
       }
     }
 
-    const resolvedRegion = region || matchedCandidate?.region || "Indonesia";
+    const topic = n.topic ? String(n.topic).trim() : (validatedTopics[validatedNews.length % validatedTopics.length]?.tag || "Trends");
+    const summary = String(n.summary || n.excerpt || matchedCandidate.description || "").trim();
+    const readTime = n.read_time ? String(n.read_time).trim() : "3 min";
+    const resolvedRegion = matchedCandidate.region || "Indonesia";
+
+    newsUrls.add(matchedUrlLower);
+    newsTitles.add(lowerTitle);
 
     validatedNews.push({
-      id: `daily-news-${Date.now()}-${i + 1}`,
+      id: `daily-news-${Date.now()}-${validatedNews.length + 1}`,
       title,
-      source: source || matchedCandidate?.source || "Media",
-      url: matchedCandidate ? matchedCandidate.url : rawUrl,
-      published_at: publishedAt || matchedCandidate?.publishedAt || new Date().toISOString(),
+      source: matchedCandidate.source,
+      url: matchedCandidate.url,
+      published_at: matchedCandidate.publishedAt || new Date().toISOString(),
       topic,
       excerpt: summary,
       summary: summary,
@@ -847,9 +836,34 @@ export function validateDailyBriefData(
       imageUrl: imageUrl,
       read_time: readTime
     });
+
+    if (validatedNews.length >= 5) {
+      break;
+    }
   }
 
-  return { topics: validatedTopics, news_items: validatedNews };
+  // Enforce Indonesia-first policy: Global news maximum 2 (Rule 7)
+  const finalNews: DailyNewsItem[] = [];
+  let globalCount = 0;
+  for (const item of validatedNews) {
+    if (item.region === "Global") {
+      if (globalCount < 2) {
+        finalNews.push(item);
+        globalCount++;
+      } else {
+        console.warn(`[validateDailyBriefData] Dropping excess global news item: '${item.title}'.`);
+      }
+    } else {
+      finalNews.push(item);
+    }
+    if (finalNews.length >= 5) break;
+  }
+
+  if (finalNews.length === 0) {
+    throw new Error("Validation failed: No valid NewsAPI articles could be validated from Gemini curation.");
+  }
+
+  return { topics: validatedTopics, news_items: finalNews };
 }
 
 export const FACT_GUARD_SYSTEM_INSTRUCTION = `
@@ -900,9 +914,9 @@ Tugas utama Anda adalah mengkurasi dan merangkum berita harian secara 100% FAKTU
 
 # ATURAN KURASI TREN & BERITA (INDONESIA-FIRST):
 1. PRIORITAS WILAYAH:
-   - Target utama: 5 berita harus berfokus pada Indonesia (relevan dengan Instagram, media sosial, pemasaran digital, content creator, e-commerce, UMKM, dan teknologi pemasaran di Indonesia).
-   - Berita global BOLEH masuk MAKSIMAL 2 dari 5 berita, dan HANYA jika benar-benar berita besar/signifikan/booming yang berdampak luas (misalnya peluncuran fitur baru Meta/Instagram, terobosan AI raksasa).
-   - Berita global TIDAK wajib ada (boleh 0 berita global jika tidak ada yang memenuhi kriteria dampak besar, sehingga kelima berita berasal dari Indonesia).
+   - Pilih hingga 5 berita terbaik (atau sebanyak kandidat valid yang tersedia jika kurang dari 5) yang berfokus pada Indonesia (relevan dengan Instagram, media sosial, pemasaran digital, content creator, e-commerce, UMKM, dan teknologi pemasaran di Indonesia).
+   - Berita global BOLEH masuk MAKSIMAL 2 dari total berita, dan HANYA jika benar-benar berita besar/signifikan/booming yang berdampak luas (misalnya peluncuran fitur baru Meta/Instagram, terobosan AI raksasa).
+   - Berita global TIDAK wajib ada (boleh 0 berita global jika tidak ada yang memenuhi kriteria dampak besar, sehingga seluruh berita berasal dari Indonesia).
    - Jangan pernah mengganti berita Indonesia yang relevan hanya demi memasukkan berita global.
 
 2. WAJIB 100% BAHASA INDONESIA:
@@ -914,7 +928,7 @@ Tugas utama Anda adalah mengkurasi dan merangkum berita harian secara 100% FAKTU
 3. INTEGRITAS DATA:
    - PRESERVE persis nilai 'url', 'source', dan 'published_at' dari kandidat yang dipilih. DILARANG KERAS mengarang, mengubah, atau membuat URL fiktif.
    - Pilih TEPAT 3 Topik Tren (topics) dengan topik tren utama berfokus pada fakta aktual Indonesia/kawasan.
-   - Pilih TEPAT 5 Berita Industri (news_items).
+   - Pilih hingga 5 Berita Industri (news_items) HANYA dari kandidat yang diberikan. DILARANG membuat artikel fiktif jika kandidat kurang dari 5.
 
 4. FORMAT OUTPUT:
    - Kembalikan HANYA format JSON valid tanpa teks pengantar atau penutup.`;
@@ -934,11 +948,11 @@ ${JSON.stringify(simplifiedCandidates, null, 2)}
 
 Kurasi kandidat berita di atas menjadi Daily Brief dengan aturan:
 1. Topik tren (topics): TEPAT 3 topik tren (prioritas Indonesia & regional).
-2. Berita pilihan (news_items): TEPAT 5 berita:
+2. Berita pilihan (news_items): Hingga 5 berita terbaik dari kandidat:
    - Prioritaskan berita Indonesia (relevan dengan media sosial, pemasaran digital, kreator, UMKM, e-commerce).
    - Berita global maksimal 2 (boleh 0 jika berita Indonesia sudah kuat atau tidak ada berita global yang sangat penting).
    - Judul ('title') dan ringkasan ('summary') WAJIB 100% Bahasa Indonesia.
-   - URL dan source HARUS persis sama dengan kandidat yang dipilih.
+   - URL dan source HARUS persis sama dengan kandidat yang dipilih. DILARANG mengarang artikel fiktif.
 
 Format JSON yang HARUS dikembalikan:
 {
@@ -981,7 +995,7 @@ Format JSON yang HARUS dikembalikan:
 
 CRITICAL RULES:
 - "topics" must contain EXACTLY 3 items.
-- "news_items" must contain EXACTLY 5 items.
+- "news_items" must contain up to 5 items strictly from the provided candidates (do NOT invent or fabricate filler articles).
 - "url" of each news item MUST exactly match one of the candidate URLs.
 - Maximum 2 global news items allowed (can be 0 if Indonesia news dominates).
 - All titles and summaries MUST be 100% in Bahasa Indonesia.
@@ -1051,7 +1065,7 @@ export const refreshDailyBriefServerFn = createServerFn({ method: "POST" })
       if (!data?.force) {
         // If not forced, check if today's brief already exists in DB
         const existing = await getDailyBriefByDate(todayStr);
-        if (existing && existing.topics?.length === 3 && existing.news_items?.length === 5) {
+        if (existing && existing.topics?.length === 3 && existing.news_items && existing.news_items.length > 0) {
           return { success: true, brief: existing };
         }
       }
