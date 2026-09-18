@@ -605,8 +605,9 @@ export function IndexPage() {
     setMessages((prev) => [...prev, newMsg]);
     setIsTyping(true);
 
-    // Save User message & update title if first message
-    if (currentUser && currentThreadId) {
+    try {
+      // Save User message & update title if first message
+      if (currentUser && currentThreadId) {
       const isFirst = messages.length === 0;
       const titleUpdate = isFirst ? textToSend.slice(0, 32) : undefined;
       saveChatMessageToDb(currentUser.id, currentThreadId, "user", textToSend, undefined, titleUpdate);
@@ -758,7 +759,9 @@ export function IndexPage() {
       lower.includes("opsi baru") ||
       lower.includes("ide baru");
 
-    const isRecommendationRequest = isLegacyRecommendation || isNaturalContentCreation || isNewsFollowUpAction || isNewOptionsRequest;
+    const isRecommendationRequest =
+      isLegacyRecommendation ||
+      (!isDiscussionOrQuestion && (isNaturalContentCreation || isNewsFollowUpAction || isNewOptionsRequest));
 
     // 6. Intent: Video & Image (Priority: Recommendation -> Video -> Image)
     const isVideoRequest = !isRecommendationRequest && isExplicitVideoAction && !isDiscussionOrQuestion;
@@ -965,38 +968,34 @@ export function IndexPage() {
         }
       }
     } else if (isImageRequest) {
-      const currentContentId = activeContentId || getLatestContentId();
+      const currentContentId = activeContentId || getLatestContentId() || undefined;
 
-      if (!currentContentId) {
-        const gateText = "Pilih dan ACC salah satu opsi konten di atas dulu yuk! Setelah itu Sparky siap langsung buatkan visual gambar HD yang sesuai dengan konsep pilihanmu. 🎨✨";
-        const agentMsg: ChatMessage = { id: agentMsgId, role: "agent", text: gateText, type: "general" };
-        setMessages((prev) => [...prev, agentMsg]);
-        setIsTyping(false);
-
-        if (currentUser && currentThreadId) {
-          saveChatMessageToDb(currentUser.id, currentThreadId, "sparky", gateText, { type: "general" });
-        }
-        return;
-      }
-
-      const approvedMsg = messages.slice().reverse().find(
-        (m) => (m.contentId === currentContentId || m.approvedData?.savedPostId === currentContentId) && m.approvedData
-      );
+      const approvedMsg = currentContentId
+        ? messages.slice().reverse().find(
+            (m) => (m.contentId === currentContentId || m.approvedData?.savedPostId === currentContentId) && m.approvedData
+          )
+        : undefined;
       const approved = approvedMsg?.approvedData;
       const effectiveImgPrompt = approved?.imagePrompt || textToSend;
-      const cleanImgTopic = approved?.title || textToSend.replace(/^(bikin|buatkan|buat|generate|minta)\s+(gambar|foto|visual)\s*/i, "").trim() || "Visual HD";
+      const cleanImgTopic =
+        approved?.title ||
+        textToSend
+          .replace(/^(bikin|buatkan|buat|generate|minta|tolong)\s+(gambar|foto|visual)\s*/i, "")
+          .replace(/^(gambar|foto|visual)\s*/i, "")
+          .trim() || "Visual HD";
 
       let resImg: { imageUrl: string; error?: string } = { imageUrl: "" };
       try {
         resImg = await generateNanoBananaImage({
           prompt: effectiveImgPrompt,
           aspectRatio: "4:5",
-          contentId: currentContentId,
+          contentId: currentContentId || `img-${Date.now()}`,
           topicTitle: cleanImgTopic,
           userId: currentUser?.id
         });
       } catch (e: any) {
         console.error("Error generating image media:", e);
+        resImg = { imageUrl: "", error: e?.message || "Gagal memproses gambar visual" };
       }
 
       const hasValidImg = isValidMediaUrl(resImg.imageUrl);
@@ -1194,20 +1193,47 @@ export function IndexPage() {
         });
       }
     } else {
+      // Build conversational context from recent messages (up to 6 past messages)
+      const recentHistory = messages
+        .slice(-6)
+        .map((m) => `${m.role === "user" ? "User" : "Sparky"}: ${m.text}`)
+        .join("\n");
+      const contextualPrompt = recentHistory
+        ? `Riwayat percakapan sebelumnya:\n${recentHistory}\n\nPesan terbaru dari User:\n${textToSend}\n\nJawab pesan terbaru user di atas secara relevan, natural, dan kontekstual.`
+        : textToSend;
+
+      const systemInstruction =
+        "Kamu adalah Sparky, asisten AI konsultan pemasaran Instagram dari InstaSpark. " +
+        "Karaktermu ramah, luwes, komunikatif, solutif, dan profesional. " +
+        "Jawab dalam Bahasa Indonesia yang santai tapi berbobot (2-3 paragraf ringkas). " +
+        "Bantu pengguna menjawab pertanyaan, mendiskusikan ide konten, strategi engagement, atau copywriting Instagram. " +
+        "Jika relevan, kamu bisa menyarankan pengguna untuk meminta '4 opsi konten' atau 'buatkan gambar' untuk konsep yang sedang dibahas.";
+
       const aiReply = await callGeminiApi({
-        prompt: textToSend,
-        systemInstruction: "You are Sparky, an AI Instagram Marketing Consultant. ALWAYS respond in VERY CONCISE, DIRECT, AND SHORT Indonesian (maximum 2-3 brief sentences). Be friendly, helpful, and get straight to the point without long disclaimers, repeated marketing speeches, or fluffy intros."
+        prompt: contextualPrompt,
+        systemInstruction,
+        temperature: 0.7
       });
 
       const agentMsg: ChatMessage = { id: agentMsgId, role: "agent", text: aiReply, type: "general" };
       setMessages((prev) => [...prev, agentMsg]);
-      setIsTyping(false);
 
       if (currentUser && currentThreadId) {
         saveChatMessageToDb(currentUser.id, currentThreadId, "sparky", aiReply, { type: "general" });
       }
     }
+  } catch (err: any) {
+    console.error("Error in handleSend:", err);
+    const failText = "Maaf, terjadi kendala saat memproses pesanmu. Silakan coba tanyakan kembali atau beritahu Sparky topik apa yang ingin kamu diskusikan! 😊";
+    const agentMsg: ChatMessage = { id: agentMsgId, role: "agent", text: failText, type: "general" };
+    setMessages((prev) => [...prev, agentMsg]);
+    if (currentUser && currentThreadId) {
+      saveChatMessageToDb(currentUser.id, currentThreadId, "sparky", failText, { type: "general" });
+    }
+  } finally {
+    setIsTyping(false);
   }
+}
 
   async function handleACCApproval(msgId: string, option: ContentRecommendationOption) {
     if (!currentUser) {

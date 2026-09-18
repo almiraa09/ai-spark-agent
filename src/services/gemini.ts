@@ -1,3 +1,4 @@
+import { createServerFn } from "@tanstack/react-start";
 import { sanitizeVisualPrompt } from "./media-services";
 
 /**
@@ -32,7 +33,92 @@ export interface AIAnalysisResult {
   actionItems: string[];
 }
 
+/**
+ * Server Function RPC bridge for Gemini Chat & Analysis
+ * Strictly executed on the server, accessing process.env.GEMINI_API_KEY.
+ * Avoids browser CORS and client API key leakage.
+ */
+export const callGeminiChatServerFn = createServerFn({ method: "POST" })
+  .validator((data: {
+    prompt: string;
+    systemInstruction?: string;
+    temperature?: number;
+    maxOutputTokens?: number;
+  }) => data)
+  .handler(async ({ data }): Promise<string> => {
+    const apiKey = (typeof process !== "undefined" && process.env ? process.env.GEMINI_API_KEY : "") || "";
+    if (!apiKey) {
+      return mockGeminiResponse(data.prompt);
+    }
+
+    const candidateModels = ["gemini-3.5-flash-lite", "gemini-3.6-flash"];
+
+    for (const model of candidateModels) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 12000);
+
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: controller.signal,
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [{ text: data.prompt }]
+              }
+            ],
+            systemInstruction: data.systemInstruction ? {
+              parts: [{ text: data.systemInstruction }]
+            } : {
+              parts: [{ text: "Kamu adalah Sparky, asisten AI pemasaran Instagram dari InstaSpark. Jawab dalam Bahasa Indonesia yang ramah, luwes, komunikatif, dan sangat membantu." }]
+            },
+            generationConfig: {
+              temperature: data.temperature ?? 0.7,
+              maxOutputTokens: data.maxOutputTokens ?? 1000,
+            }
+          })
+        });
+
+        clearTimeout(timer);
+
+        if (response.ok) {
+          const resData = await response.json();
+          const textResult = resData.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (textResult) {
+            return textResult;
+          }
+        }
+      } catch {
+        // Try next candidate model
+      }
+    }
+
+    return mockGeminiResponse(data.prompt);
+  });
+
 export async function callGeminiApi(options: GeminiRequestOptions): Promise<string> {
+  // If running in browser or client context, use the server function bridge for 100% reliability & security
+  if (typeof window !== "undefined") {
+    try {
+      const serverRes = await callGeminiChatServerFn({
+        data: {
+          prompt: options.prompt,
+          systemInstruction: options.systemInstruction,
+          temperature: options.temperature,
+          maxOutputTokens: options.maxOutputTokens,
+        }
+      });
+      if (serverRes) {
+        return serverRes;
+      }
+    } catch (e) {
+      console.warn("Notice calling Gemini chat server function, falling back to direct call:", e);
+    }
+  }
+
+  // Server-side or direct environment
   const apiKey =
     options.apiKey ||
     (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
@@ -45,7 +131,7 @@ export async function callGeminiApi(options: GeminiRequestOptions): Promise<stri
     return mockGeminiResponse(options.prompt);
   }
 
-  const candidateModels = ["gemini-3.5-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-flash-latest"];
+  const candidateModels = ["gemini-3.5-flash-lite", "gemini-3.6-flash"];
 
   for (const model of candidateModels) {
     try {

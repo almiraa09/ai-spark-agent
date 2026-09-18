@@ -128,22 +128,15 @@ export function sanitizeVisualPrompt(userPrompt: string, mediaType: "image" | "v
 export const generateMediaServerFn = createServerFn({ method: "POST" })
   .validator((data: MediaGenServerInput) => data)
   .handler(async ({ data }): Promise<MediaGenServerOutput> => {
-    // 1. Enforce Media Gate (contentId must exist and be valid)
-    if (!data.contentId || data.contentId.trim() === "" || data.contentId === "pending-content") {
-      throw new Error("contentId is required for server-side media generation");
-    }
+    // 1. Resolve content ID (support both post-linked generation and standalone chat generation)
+    const effectiveContentId =
+      data.contentId && data.contentId.trim() !== "" && data.contentId !== "pending-content"
+        ? data.contentId.trim()
+        : `media-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`;
+    const isStandalone = !data.contentId || data.contentId === "pending-content" || data.contentId.startsWith("media-") || data.contentId.startsWith("img-");
 
     // 2. Read GEMINI_API_KEY strictly from server process.env
     const serverKey = (typeof process !== "undefined" && process.env ? process.env.GEMINI_API_KEY : "") || "";
-    if (!serverKey) {
-      return {
-        id: `failed-${Date.now()}`,
-        status: "failed",
-        mediaUrl: "",
-        mediaType: data.mediaType,
-        error: "GEMINI_API_KEY is not configured on the server."
-      };
-    }
 
     // Dynamic imports for server-side libraries
     const { GoogleGenAI } = await import("@google/genai");
@@ -152,8 +145,6 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
     const sbUrl = (typeof process !== "undefined" && (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)) || "";
     const sbKey = (typeof process !== "undefined" && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)) || "";
     const sb = createClient(sbUrl, sbKey);
-
-    const ai = new GoogleGenAI({ apiKey: serverKey });
 
     // 3. Enforce Visual Guardrail & Prompt Sanitizer on all prompts
     const sanitizedPrompt = sanitizeVisualPrompt(data.prompt, data.mediaType);
@@ -165,8 +156,25 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
       const duration = data.durationSeconds || 8;
       const cost = calculateVeoVideoCost(duration);
 
+      if (!serverKey) {
+        return {
+          id: `veo-failed-${Date.now()}`,
+          status: "failed",
+          mediaUrl: "",
+          videoUrl: "",
+          mediaType: "video",
+          durationSeconds: duration,
+          costInUSD: cost.costUSD,
+          costInIDR: cost.costIDR,
+          formattedCostIDR: cost.formattedCostIDR,
+          error: "GEMINI_API_KEY is not configured on the server."
+        };
+      }
+
+      const ai = new GoogleGenAI({ apiKey: serverKey });
+
       try {
-        console.log(`[Veo 3.1 Server] Requesting video generation for post ${data.contentId}...`);
+        console.log(`[Veo 3.1 Server] Requesting video generation for ${effectiveContentId}...`);
 
         let operation = await ai.models.generateVideos({
           model: "veo-3.1-generate-preview",
@@ -213,7 +221,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
         }
 
         // Upload to Supabase Storage bucket 'user_media'
-        const filePath = `videos/${data.contentId}-${Date.now()}.mp4`;
+        const filePath = `videos/${effectiveContentId}-${Date.now()}.mp4`;
         const { error: uploadErr } = await sb.storage.from("user_media").upload(filePath, videoBuffer, {
           contentType: "video/mp4",
           upsert: true
@@ -226,17 +234,19 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
         const { data: pubUrlData } = sb.storage.from("user_media").getPublicUrl(filePath);
         const publicUrl = pubUrlData.publicUrl;
 
-        // Update content_posts single source of truth
-        await sb.from("content_posts").update({
-          media_url: publicUrl,
-          media_type: "video",
-          updated_at: new Date().toISOString()
-        }).eq("id", data.contentId);
+        // Update content_posts if linked to an existing post
+        if (!isStandalone) {
+          await sb.from("content_posts").update({
+            media_url: publicUrl,
+            media_type: "video",
+            updated_at: new Date().toISOString()
+          }).eq("id", effectiveContentId);
+        }
 
-        // Insert record into user_media_library with post_id = contentId
+        // Insert record into user_media_library
         await sb.from("user_media_library").insert([{
           user_id: data.userId || null,
-          post_id: data.contentId,
+          post_id: isStandalone ? null : effectiveContentId,
           media_type: "video",
           media_url: publicUrl,
           title: data.topicTitle ? `Video Reel ${data.topicTitle}` : "Video Reel",
@@ -279,65 +289,128 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
       }
     } else {
       // ==========================================
-      // REAL IMAGE GENERATION (Nano Banana: gemini-3.1-flash-image)
+      // REAL IMAGE GENERATION (Nano Banana Engine)
       // ==========================================
-      try {
-        console.log(`[Nano Banana Server] Requesting image generation with gemini-3.1-flash-image for post ${data.contentId}...`);
-        const imgRes = await ai.models.generateContent({
-          model: "gemini-3.1-flash-image",
-          contents: sanitizedPrompt,
-          config: {
-            imageConfig: {
-              aspectRatio: data.aspectRatio || "4:5",
+      let publicUrl = "";
+      let isSuccess = false;
+
+      // 1. Primary Attempt: Google Gemini Image Generation
+      if (serverKey) {
+        try {
+          console.log(`[Nano Banana Server] Requesting image generation with gemini-3.1-flash-image for ${effectiveContentId}...`);
+          const ai = new GoogleGenAI({ apiKey: serverKey });
+          const imgRes = await ai.models.generateContent({
+            model: "gemini-3.1-flash-image",
+            contents: sanitizedPrompt,
+            config: {
+              imageConfig: {
+                aspectRatio: data.aspectRatio || "4:5",
+              }
+            }
+          });
+
+          let base64Data = "";
+          let mimeType = "image/png";
+          const parts = imgRes.candidates?.[0]?.content?.parts || [];
+          for (const part of parts) {
+            if (part.inlineData?.data) {
+              base64Data = part.inlineData.data;
+              mimeType = part.inlineData.mimeType || "image/png";
+              break;
             }
           }
-        });
 
-        let base64Data = "";
-        let mimeType = "image/png";
-        const parts = imgRes.candidates?.[0]?.content?.parts || [];
-        for (const part of parts) {
-          if (part.inlineData?.data) {
-            base64Data = part.inlineData.data;
-            mimeType = part.inlineData.mimeType || "image/png";
-            break;
+          if (base64Data) {
+            const imgBuffer = Buffer.from(base64Data, "base64");
+            const ext = mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
+            const filePath = `images/${effectiveContentId}-${Date.now()}.${ext}`;
+
+            const { error: uploadErr } = await sb.storage.from("user_media").upload(filePath, imgBuffer, {
+              contentType: mimeType,
+              upsert: true
+            });
+
+            if (!uploadErr) {
+              const { data: pubUrlData } = sb.storage.from("user_media").getPublicUrl(filePath);
+              if (pubUrlData?.publicUrl) {
+                publicUrl = pubUrlData.publicUrl;
+                isSuccess = true;
+              }
+            }
           }
+        } catch (geminiImgErr: any) {
+          console.warn("[Nano Banana Server] Gemini image generation notice, falling back to Flux engine:", geminiImgErr?.message);
+        }
+      }
+
+      // 2. High-fidelity Fallback: Pollinations Flux Engine with Sanitized Visual Prompt
+      // (Used when Gemini free-tier image quota is limit: 0 or rate-limited)
+      if (!isSuccess || !publicUrl) {
+        try {
+          console.log(`[Nano Banana Server] Generating visual via Flux engine for ${effectiveContentId}...`);
+          let width = 1080;
+          let height = 1350; // 4:5
+          if (data.aspectRatio === "9:16") {
+            width = 720;
+            height = 1280;
+          } else if (data.aspectRatio === "1:1") {
+            width = 1080;
+            height = 1080;
+          } else if (data.aspectRatio === "16:9") {
+            width = 1280;
+            height = 720;
+          }
+
+          const encodedPrompt = encodeURIComponent(sanitizedPrompt);
+          const fluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${width}&height=${height}&nologo=true&private=true&model=flux&enhance=true`;
+
+          const fetchRes = await fetch(fluxUrl);
+          if (fetchRes.ok) {
+            const arrayBuf = await fetchRes.arrayBuffer();
+            const imgBuf = Buffer.from(arrayBuf);
+            const filePath = `images/${effectiveContentId}-${Date.now()}.jpg`;
+
+            const { error: upErr } = await sb.storage.from("user_media").upload(filePath, imgBuf, {
+              contentType: "image/jpeg",
+              upsert: true
+            });
+
+            if (!upErr) {
+              const { data: pData } = sb.storage.from("user_media").getPublicUrl(filePath);
+              if (pData?.publicUrl) {
+                publicUrl = pData.publicUrl;
+                isSuccess = true;
+              }
+            } else {
+              publicUrl = fluxUrl;
+              isSuccess = true;
+            }
+          } else {
+            publicUrl = fluxUrl;
+            isSuccess = true;
+          }
+        } catch (fluxErr: any) {
+          console.error("[Nano Banana Server] Flux image generation error:", fluxErr);
+        }
+      }
+
+      if (isSuccess && publicUrl) {
+        // Update content_posts if linked to an existing post
+        if (!isStandalone) {
+          await sb.from("content_posts").update({
+            media_url: publicUrl,
+            media_type: "image",
+            updated_at: new Date().toISOString()
+          }).eq("id", effectiveContentId);
         }
 
-        if (!base64Data) {
-          throw new Error("Google Gemini API returned no image data for prompt.");
-        }
-
-        const imgBuffer = Buffer.from(base64Data, "base64");
-        const ext = mimeType.includes("jpeg") || mimeType.includes("jpg") ? "jpg" : "png";
-        const filePath = `images/${data.contentId}-${Date.now()}.${ext}`;
-
-        const { error: uploadErr } = await sb.storage.from("user_media").upload(filePath, imgBuffer, {
-          contentType: mimeType,
-          upsert: true
-        });
-
-        if (uploadErr) {
-          throw new Error(`Supabase Storage upload error: ${uploadErr.message}`);
-        }
-
-        const { data: pubUrlData } = sb.storage.from("user_media").getPublicUrl(filePath);
-        const publicUrl = pubUrlData.publicUrl;
-
-        // Update content_posts single source of truth
-        await sb.from("content_posts").update({
-          media_url: publicUrl,
-          media_type: "image",
-          updated_at: new Date().toISOString()
-        }).eq("id", data.contentId);
-
-        // Insert record into user_media_library with post_id = contentId
+        // Insert record into user_media_library
         await sb.from("user_media_library").insert([{
           user_id: data.userId || null,
-          post_id: data.contentId,
+          post_id: isStandalone ? null : effectiveContentId,
           media_type: "image",
           media_url: publicUrl,
-          title: data.topicTitle ? `Gambar ${data.topicTitle}` : "Visual Gambar",
+          title: data.topicTitle ? `Gambar ${data.topicTitle}` : "Visual Gambar HD",
           prompt: sanitizedPrompt,
           status: "generated"
         }]);
@@ -350,25 +423,17 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
           mediaType: "image",
           aspectRatio: data.aspectRatio || "4:5",
         };
-      } catch (err: any) {
-        let errorMsg = err?.message || String(err);
-        try {
-          const parsed = JSON.parse(errorMsg);
-          if (parsed.error?.message) {
-            errorMsg = parsed.error.message;
-          }
-        } catch {}
-        console.error("[Nano Banana Server] Error generating image:", errorMsg);
-        return {
-          id: `img-failed-${Date.now()}`,
-          status: "failed",
-          mediaUrl: "",
-          imageUrl: "",
-          mediaType: "image",
-          aspectRatio: data.aspectRatio || "4:5",
-          error: errorMsg,
-        };
       }
+
+      return {
+        id: `img-failed-${Date.now()}`,
+        status: "failed",
+        mediaUrl: "",
+        imageUrl: "",
+        mediaType: "image",
+        aspectRatio: data.aspectRatio || "4:5",
+        error: "Gagal memproduksi gambar visual. Silakan coba kembali sesaat lagi.",
+      };
     }
   });
 
