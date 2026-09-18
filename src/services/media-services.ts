@@ -83,6 +83,33 @@ export function calculateVeoVideoCost(durationSeconds: number) {
 }
 
 /**
+ * Built-in Indonesian-to-English Subject Mapping for Visual Generation
+ */
+const INDO_TO_EN_SUBJECT_MAP: Record<string, string> = {
+  kelinci: "A realistic cute fluffy rabbit sitting in a lush green garden",
+  kucing: "A cute realistic fluffy cat with soft fur and expressive eyes",
+  anjing: "A friendly playful domestic dog in a bright park",
+  kopi: "An aesthetic cup of hot cappuccino with latte art on a wooden cafe table",
+  makanan: "A delicious gourmet meal beautifully plated on a restaurant table",
+  mobil: "A sleek modern luxury sports car parked on a scenic road",
+  motor: "A modern stylish motorcycle with metallic finish",
+  baju: "An aesthetic fashionable clothing outfit flatlay style",
+  skincare: "A luxury minimalist skincare cosmetic bottle on a clean marble surface",
+  bunga: "A vibrant fresh bouquet of colorful blooming flowers",
+  pantai: "A stunning tropical beach with turquoise ocean water and white sand",
+  gunung: "A breathtaking majestic mountain peak under clear morning sunlight",
+  alam: "A scenic picturesque natural landscape with greenery and trees",
+  pemandangan: "A scenic picturesque natural landscape with greenery and trees",
+  gajah: "A majestic realistic elephant walking in the savanna",
+  singa: "A majestic realistic lion with a grand mane",
+  harimau: "A majestic realistic tiger in a lush jungle",
+  buaya: "A realistic crocodile resting near a riverbank",
+  naga: "A majestic mythical dragon with detailed scales",
+  burung: "A colorful beautiful bird perched on a branch",
+  ikan: "A colorful vibrant tropical fish swimming in clear water"
+};
+
+/**
  * Visual Guardrail & Prompt Sanitizer (Strict)
  * Enforces Subject-Lock, Framing & Composition, and Video Stability & Continuity.
  */
@@ -94,20 +121,39 @@ export function sanitizeVisualPrompt(userPrompt: string, mediaType: "image" | "v
     cleaned = cleaned.split("Visual constraints:")[0].trim();
   }
 
-  // Framing & Composition Guardrail: Replace extreme close-ups causing zoom/crop issues
-  cleaned = cleaned.replace(/\bextreme close[- ]?up\b/gi, "medium shot with clear margins");
-  cleaned = cleaned.replace(/\bmacro close[- ]?up\b/gi, "centered medium shot");
+  // Strip conversational prefixes
+  let subjectOnly = cleaned
+    .replace(/^(tolong|bisa|coba|mohon)\s+/i, "")
+    .replace(/^(buatkan|bikin|buat|generate|produksi|minta)\s+/i, "")
+    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|reel|reels)\s+/i, "")
+    .replace(/^(tentang|mengenai|dari)\s+/i, "")
+    .trim();
 
-  // Ensure clean punctuation before appending visual constraints
-  if (cleaned.endsWith(".")) {
-    cleaned = cleaned.slice(0, -1).trim();
+  // Framing & Composition Guardrail: Replace extreme close-ups causing zoom/crop issues
+  subjectOnly = subjectOnly.replace(/\bextreme close[- ]?up\b/gi, "medium shot with clear margins");
+  subjectOnly = subjectOnly.replace(/\bmacro close[- ]?up\b/gi, "centered medium shot");
+
+  // Ensure clean punctuation
+  if (subjectOnly.endsWith(".")) {
+    subjectOnly = subjectOnly.slice(0, -1).trim();
   }
 
-  const basePrompt = cleaned || "High quality Instagram marketing visual";
+  // Translate Indonesian keyword if found in dictionary
+  let englishSubject = "";
+  const lowerSubject = subjectOnly.toLowerCase();
+  for (const [key, val] of Object.entries(INDO_TO_EN_SUBJECT_MAP)) {
+    if (lowerSubject.includes(key)) {
+      englishSubject = val;
+      break;
+    }
+  }
+
+  const basePrompt = englishSubject || subjectOnly || cleaned || "High quality Instagram marketing visual";
 
   // Lock subject and framing (Subject-Lock & Framing Directives)
+  // Note: Avoid 'no cropped limbs' on generic subjects to prevent human bias in AI generators
   const baseRules =
-    "Photorealistic, centered framing, high resolution, complete subject inside the camera frame, no cropped limbs, no text overlay, centered subject, wide shot / medium shot, clear margins, full body visible in frame.";
+    "Photorealistic 4k, centered subject, complete subject fully visible inside camera frame, clear margins, studio lighting, highly detailed.";
 
   // Video Stability & Continuity (Movement Directives)
   const motionRules =
@@ -116,6 +162,88 @@ export function sanitizeVisualPrompt(userPrompt: string, mediaType: "image" | "v
       : "";
 
   return `${basePrompt}. Visual constraints: ${baseRules} ${motionRules}`.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Server-side dynamic Subject-Lock prompt resolver
+ * Uses Gemini AI on server to accurately translate any conversational Indonesian request into
+ * an explicit, subject-locked English text-to-image prompt.
+ */
+async function resolveSubjectLockedPrompt(
+  userPrompt: string,
+  mediaType: "image" | "video",
+  ai?: any
+): Promise<string> {
+  let cleaned = (userPrompt || "").trim();
+  if (cleaned.includes("Visual constraints:")) {
+    cleaned = cleaned.split("Visual constraints:")[0].trim();
+  }
+
+  let subjectOnly = cleaned
+    .replace(/^(tolong|bisa|coba|mohon)\s+/i, "")
+    .replace(/^(buatkan|bikin|buat|generate|produksi|minta)\s+/i, "")
+    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|reel|reels)\s+/i, "")
+    .replace(/^(tentang|mengenai|dari)\s+/i, "")
+    .trim();
+
+  let englishSubject = "";
+
+  // 1. If Gemini AI instance is available, use it for ultra-accurate Subject-Lock translation
+  if (ai) {
+    try {
+      const res = await ai.models.generateContent({
+        model: "gemini-3.5-flash-lite",
+        contents: [{
+          parts: [{
+            text: `You are an expert text-to-image prompt engineer. Convert the user request from Indonesian into an explicit English prompt with STRICT SUBJECT-LOCK.
+DIRECTIVES:
+1. The very first 3-5 words MUST explicitly name and lock the primary subject (e.g. 'A cute fluffy rabbit...', 'A sleek red sports car...').
+2. NEVER use metaphors, poetry, or vague allegories.
+3. Translate all Indonesian concepts into explicit, literal English.
+4. Output ONLY the English prompt, with NO explanations, quotes, or markdown.
+
+User request: "${subjectOnly || cleaned}"`
+          }]
+        }],
+        config: {
+          maxOutputTokens: 100,
+          temperature: 0.2
+        }
+      });
+      const text = res.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+      if (text && text.length > 5 && !text.includes("\n")) {
+        englishSubject = text;
+      }
+    } catch (e) {
+      console.warn("[Subject-Lock] Gemini prompt translation notice, using dictionary fallback:", e);
+    }
+  }
+
+  // 2. Dictionary fallback for instant subject lock
+  if (!englishSubject) {
+    const lowerSubject = subjectOnly.toLowerCase();
+    for (const [key, val] of Object.entries(INDO_TO_EN_SUBJECT_MAP)) {
+      if (lowerSubject.includes(key)) {
+        englishSubject = val;
+        break;
+      }
+    }
+  }
+
+  let finalSubject = englishSubject || subjectOnly || cleaned || "High quality Instagram marketing visual";
+  if (finalSubject.endsWith(".")) {
+    finalSubject = finalSubject.slice(0, -1).trim();
+  }
+
+  const baseRules =
+    "Photorealistic 4k, centered subject, complete subject fully visible inside camera frame, clear margins, studio lighting, highly detailed.";
+
+  const motionRules =
+    mediaType === "video"
+      ? "smooth fluid motion, steady camera angle, 24fps look, subtle movement, natural lighting change."
+      : "";
+
+  return `${finalSubject}. Visual constraints: ${baseRules} ${motionRules}`.replace(/\s+/g, " ").trim();
 }
 
 /**
@@ -145,9 +273,10 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
     const sbUrl = (typeof process !== "undefined" && (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL)) || "";
     const sbKey = (typeof process !== "undefined" && (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY)) || "";
     const sb = createClient(sbUrl, sbKey);
+    const ai = serverKey ? new GoogleGenAI({ apiKey: serverKey }) : null;
 
-    // 3. Enforce Visual Guardrail & Prompt Sanitizer on all prompts
-    const sanitizedPrompt = sanitizeVisualPrompt(data.prompt, data.mediaType);
+    // 3. Enforce Visual Guardrail & Prompt Sanitizer with AI-powered Subject-Lock
+    const sanitizedPrompt = await resolveSubjectLockedPrompt(data.prompt, data.mediaType, ai);
 
     if (data.mediaType === "video") {
       // ==========================================
