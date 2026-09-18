@@ -265,3 +265,6 @@ function hashCode(str: string): number {
   }
   return hash;
 }
+
+export { FACT_GUARD_SYSTEM_INSTRUCTION, processDailyNews } from "./news-service";
+

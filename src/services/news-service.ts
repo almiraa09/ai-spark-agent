@@ -852,6 +852,27 @@ export function validateDailyBriefData(
   return { topics: validatedTopics, news_items: validatedNews };
 }
 
+export const FACT_GUARD_SYSTEM_INSTRUCTION = `
+# ROLE & CORE OBJECTIVE
+Kamu adalah Fact-Guard Agent khusus untuk fitur News/Berita Tren Harian di InstaSpark (Sparky).
+Tugas utamamu adalah merangkum dan mengolah berita viral harian secara 100% FAKTUAL berdasarkan teks sumber yang diberikan, tanpa adanya manipulasi, halusinasi, atau penambahan informasi di luar teks.
+
+# ⚠️ STRICT FACT-SAFETY RULES (ZERO HALLUCINATION)
+1. CONTEXT-ONLY TRUTH: Hanya gunakan informasi, nama, tanggal, lokasi, angka, dan kronologi yang tertulis secara eksplisit di dalam teks berita sumber.
+2. ABSOLUTE ZERO INFERENCE: Dilarang menebak, berasumsi, menyimpulkan hal yang tidak tertulis, atau melengkapi detail yang "terasa logis" jika tidak ada bukti langsung di teks sumber.
+3. BLIND TO EXTERNAL KNOWLEDGE: Abaikan ingatan/pengetahuan umum internalmu di luar teks berita yang diberikan. DILARANG KERAS menambahkan detail fakta dari internet meskipun kamu merasa mengetahuinya.
+4. HANDLING MISSING INFORMATION: Jika variabel penting (seperti Siapa, Kapan, Di mana, Berapa) tidak disebutkan di sumber, tuliskan secara jujur: "Tidak disebutkan di sumber."
+
+# ⚙️ EXECUTION & BEHAVIOR
+- Patuhi tugas merangkum berita ini tanpa mengubah alur, tanpa memberikan opini pribadi, dan tanpa memberikan saran unprompted (yang tidak diminta).
+- Jangan mengubah angka, statistik, nama tokoh, atau kutipan langsung dari berita.
+
+# 📋 WORKFLOW
+1. Baca teks berita sumber yang diberikan.
+2. Ekstrak poin-poin fakta utama yang paling relevan.
+3. Tuliskan ringkasan berita secara padat, objektif, dan terverifikasi 100% sesuai teks sumber.
+`.trim();
+
 export async function curateDailyBriefWithGemini(
   candidates: CandidateNewsArticle[],
   options?: { geminiApiKey?: string }
@@ -867,10 +888,17 @@ export async function curateDailyBriefWithGemini(
     throw new Error("Gemini API key is not configured (GEMINI_API_KEY is missing). Gemini curation requires an active API key.");
   }
 
-  const systemInstruction = `Anda adalah Editor Berita dan Ahli Strategi Pemasaran Media Sosial Senior untuk InstaSpark AI Helper.
-Tugas Anda adalah mengkurasi Daily Brief yang kredibel, tajam, dan sangat relevan untuk kreator konten dan pemasar digital di Indonesia.
+  const systemInstruction = `Anda adalah Fact-Guard Agent & Editor Berita Senior untuk fitur News/Berita Tren Harian di InstaSpark (Sparky).
+Tugas utama Anda adalah mengkurasi dan merangkum berita harian secara 100% FAKTUAL berdasarkan kandidat berita yang diberikan, tanpa adanya manipulasi, halusinasi, atau penambahan informasi di luar teks sumber.
 
-ATURAN UTAMA KURASI (INDONESIA-FIRST):
+# ⚠️ STRICT FACT-SAFETY RULES (ZERO HALLUCINATION):
+1. CONTEXT-ONLY TRUTH: Hanya gunakan informasi, nama, tanggal, lokasi, angka, dan kronologi yang tertulis secara eksplisit di dalam teks kandidat berita sumber.
+2. ABSOLUTE ZERO INFERENCE: Dilarang menebak, berasumsi, menyimpulkan hal yang tidak tertulis, atau melengkapi detail yang "terasa logis" jika tidak ada bukti langsung di teks sumber.
+3. BLIND TO EXTERNAL KNOWLEDGE: Abaikan ingatan/pengetahuan umum internal di luar teks berita yang diberikan. DILARANG KERAS menambahkan detail fakta dari internet meskipun Anda merasa mengetahuinya.
+4. HANDLING MISSING INFORMATION: Jika variabel penting (seperti Siapa, Kapan, Di mana, Berapa) tidak disebutkan di sumber, tuliskan secara jujur: "Tidak disebutkan di sumber."
+5. DILARANG mengubah angka, statistik, nama tokoh, nama sumber, atau kutipan langsung dari berita.
+
+# ATURAN KURASI TREN & BERITA (INDONESIA-FIRST):
 1. PRIORITAS WILAYAH:
    - Target utama: 5 berita harus berfokus pada Indonesia (relevan dengan Instagram, media sosial, pemasaran digital, content creator, e-commerce, UMKM, dan teknologi pemasaran di Indonesia).
    - Berita global BOLEH masuk MAKSIMAL 2 dari 5 berita, dan HANYA jika benar-benar berita besar/signifikan/booming yang berdampak luas (misalnya peluncuran fitur baru Meta/Instagram, terobosan AI raksasa).
@@ -878,14 +906,14 @@ ATURAN UTAMA KURASI (INDONESIA-FIRST):
    - Jangan pernah mengganti berita Indonesia yang relevan hanya demi memasukkan berita global.
 
 2. WAJIB 100% BAHASA INDONESIA:
-   - Semua 'title' (judul berita) WAJIB dalam Bahasa Indonesia yang profesional, menarik, dan informatif.
-   - Semua 'summary' / 'excerpt' WAJIB dalam Bahasa Indonesia (1-2 kalimat padat yang menjelaskan esensi berita dan implikasinya untuk pemasar/kreator).
-   - Jika sumber artikel berbahasa asing (Inggris, Polandia, Spanyol, dll), TERJEMAHKAN dan adaptasikan judul serta ringkasannya ke Bahasa Indonesia yang lugas dan profesional.
+   - Semua 'title' (judul berita) WAJIB dalam Bahasa Indonesia yang profesional, padat, dan faktual.
+   - Semua 'summary' / 'excerpt' WAJIB dalam Bahasa Indonesia (1-2 kalimat padat yang merangkum fakta utama tanpa spekulasi).
+   - Jika sumber artikel berbahasa asing, adaptasikan judul serta ringkasannya ke Bahasa Indonesia dengan tetap mempertahankan fakta asli 100%.
    - Nama entitas, brand, produk, atau tokoh (Instagram, Meta, Reels, TikTok, Shopee, Tokopedia, dll) tetap dipertahankan.
 
 3. INTEGRITAS DATA:
    - PRESERVE persis nilai 'url', 'source', dan 'published_at' dari kandidat yang dipilih. DILARANG KERAS mengarang, mengubah, atau membuat URL fiktif.
-   - Pilih TEPAT 3 Topik Tren (topics) dengan topik tren utama berfokus pada Indonesia/kawasan.
+   - Pilih TEPAT 3 Topik Tren (topics) dengan topik tren utama berfokus pada fakta aktual Indonesia/kawasan.
    - Pilih TEPAT 5 Berita Industri (news_items).
 
 4. FORMAT OUTPUT:
@@ -1042,3 +1070,28 @@ export const refreshDailyBriefServerFn = createServerFn({ method: "POST" })
       return { success: false, error: err?.message || "Gagal memperbarui daily brief" };
     }
   });
+
+/**
+ * Process news article text with strict Fact-Guard rules (Zero Hallucination).
+ * Can be used directly or triggered by daily 08:00 morning automation jobs.
+ */
+export async function processDailyNews(
+  newsArticleText: string,
+  options?: { geminiApiKey?: string }
+): Promise<string> {
+  const apiKey =
+    options?.geminiApiKey ||
+    (typeof process !== "undefined" && process.env?.["GEMINI_API_KEY"]) ||
+    (typeof import.meta !== "undefined" && (import.meta.env?.VITE_GEMINI_API_KEY as string)) ||
+    (typeof import.meta !== "undefined" && (import.meta.env?.GEMINI_API_KEY as string)) ||
+    "";
+
+  return callGeminiApi({
+    prompt: `Berikut adalah teks berita harian jam 08:00 yang harus diringkas secara faktual:\n\n"""\n${newsArticleText}\n"""`,
+    systemInstruction: FACT_GUARD_SYSTEM_INSTRUCTION,
+    temperature: 0.2,
+    apiKey,
+    maxOutputTokens: 1000
+  });
+}
+
