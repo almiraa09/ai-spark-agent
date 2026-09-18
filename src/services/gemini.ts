@@ -72,7 +72,7 @@ export const callGeminiChatServerFn = createServerFn({ method: "POST" })
             systemInstruction: data.systemInstruction ? {
               parts: [{ text: data.systemInstruction }]
             } : {
-              parts: [{ text: "Kamu adalah Sparky, asisten AI pemasaran Instagram dari InstaSpark. Jawab dalam Bahasa Indonesia yang ramah, luwes, komunikatif, dan sangat membantu." }]
+              parts: [{ text: "Kamu adalah Sparky, asisten AI pemasaran Instagram cerdas dari InstaSpark. Kamu ahli dalam merancang strategi konten, copywriting, visual foto HD, dan memproduksi video Reels Instagram 8-detik beranimasi sinematik (didukung Google Veo 3.1 & Motion Engine). Jawab dalam Bahasa Indonesia yang ramah, luwes, komunikatif, dan sangat membantu. Jangan pernah berkata bahwa kamu tidak bisa memproduksi video atau format video bergerak, karena sistem InstaSpark dilengkapi studio produksi video Reels." }]
             },
             generationConfig: {
               temperature: data.temperature ?? 0.7,

@@ -86,6 +86,11 @@ export function calculateVeoVideoCost(durationSeconds: number) {
  * Built-in Indonesian-to-English Subject Mapping for Visual Generation
  */
 const INDO_TO_EN_SUBJECT_MAP: Record<string, string> = {
+  "kucing berjalan": "A cute realistic fluffy cat gracefully walking forward on green grass",
+  "kucing jalan": "A cute realistic fluffy cat gracefully walking forward on green grass",
+  "kucing lari": "A playful energetic cat running across a sunny lawn",
+  "anjing berjalan": "A friendly playful dog happily walking on a sunny park path",
+  "kelinci berjalan": "A cute fluffy rabbit hopping gently on green lawn",
   kelinci: "A realistic cute fluffy rabbit sitting in a lush green garden",
   kucing: "A cute realistic fluffy cat with soft fur and expressive eyes",
   anjing: "A friendly playful domestic dog in a bright park",
@@ -123,9 +128,9 @@ export function sanitizeVisualPrompt(userPrompt: string, mediaType: "image" | "v
 
   // Strip conversational prefixes
   let subjectOnly = cleaned
-    .replace(/^(tolong|bisa|coba|mohon)\s+/i, "")
-    .replace(/^(buatkan|bikin|buat|generate|produksi|minta)\s+/i, "")
-    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|reel|reels)\s+/i, "")
+    .replace(/^(tolong|bisa|coba|mohon|mau|pengen)\s+/i, "")
+    .replace(/^(buatkan|bikin|bikinin|buat|buatin|generate|produksi|minta)\s+/i, "")
+    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|vidio|vidionya|reel|reels|klip|animasi)\s+/i, "")
     .replace(/^(tentang|mengenai|dari)\s+/i, "")
     .trim();
 
@@ -180,9 +185,9 @@ async function resolveSubjectLockedPrompt(
   }
 
   let subjectOnly = cleaned
-    .replace(/^(tolong|bisa|coba|mohon)\s+/i, "")
-    .replace(/^(buatkan|bikin|buat|generate|produksi|minta)\s+/i, "")
-    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|reel|reels)\s+/i, "")
+    .replace(/^(tolong|bisa|coba|mohon|mau|pengen)\s+/i, "")
+    .replace(/^(buatkan|bikin|bikinin|buat|buatin|generate|produksi|minta)\s+/i, "")
+    .replace(/^(gambar|gambarnya|visual|visualnya|foto|fotonya|video|videonya|vidio|vidionya|reel|reels|klip|animasi)\s+/i, "")
     .replace(/^(tentang|mengenai|dari)\s+/i, "")
     .trim();
 

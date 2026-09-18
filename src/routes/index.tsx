@@ -662,6 +662,16 @@ export function IndexPage() {
       lower.includes("buatkan videonya") ||
       lower.includes("lanjut bikin video") ||
       lower.includes("lanjut bikin videonya") ||
+      lower.includes("bikin vidio") ||
+      lower.includes("buat vidio") ||
+      lower.includes("buatkan vidio") ||
+      lower.includes("bikinin vidio") ||
+      lower.includes("buatin vidio") ||
+      lower.includes("bikinin video") ||
+      lower.includes("buatin video") ||
+      lower.includes("generate vidio") ||
+      lower.includes("produksi vidio") ||
+      lower.includes("minta vidio") ||
       lower.includes("bikin reels") ||
       lower.includes("buat reels") ||
       lower.includes("buatkan reels") ||
@@ -672,7 +682,9 @@ export function IndexPage() {
       lower.includes("buatkan reel") ||
       lower.includes("generate reel") ||
       lower.includes("produksi reel") ||
-      /(?:bikin|buat|buatkan|generate|produksi|minta|render)\s+(?:video|videonya|reel|reels)\b/i.test(lower);
+      /(?:bikin|bikinin|buat|buatin|buatkan|generate|produksi|minta|render|rekam|tampilkan|pengen|mau|tolong)\s+(?:video|vidio|videonya|vidionya|reel|reels|klip|animasi)\b/i.test(lower) ||
+      /^(?:video|vidio|reel|reels)\s+\w+/i.test(lower) ||
+      /(?:video|vidio|reel|reels)\s+(?:kucing|anjing|kelinci|orang|mobil|produk|makanan|bunga|alam|jalan|berjalan|lari|sinematik)/i.test(lower);
 
     // 4. Explicit Image Action detection
     const isExplicitImageAction =
@@ -691,7 +703,13 @@ export function IndexPage() {
       lower.includes("buat foto") ||
       lower.includes("buatkan foto") ||
       lower.includes("generate foto") ||
-      /(?:bikin|buat|buatkan|generate|minta)\s+(?:gambar|gambarnya|visual|foto)\b/i.test(lower);
+      lower.includes("bikinin gambar") ||
+      lower.includes("buatin gambar") ||
+      lower.includes("bikinin foto") ||
+      lower.includes("buatin foto") ||
+      /(?:bikin|bikinin|buat|buatin|buatkan|generate|produksi|minta|render|rekam|tampilkan|pengen|mau|tolong)\s+(?:gambar|gambarnya|visual|visualnya|foto|fotonya)\b/i.test(lower) ||
+      /^(?:gambar|foto|visual)\s+\w+/i.test(lower) ||
+      /(?:gambar|foto|visual)\s+(?:kucing|anjing|kelinci|orang|mobil|produk|makanan|bunga|alam|kopi|pemandangan)/i.test(lower);
 
     // 5. Intent: Content Recommendation / Creation
     const isLegacyRecommendation =
@@ -825,27 +843,22 @@ export function IndexPage() {
         });
       }
     } else if (isVideoRequest) {
-      const currentContentId = activeContentId || getLatestContentId();
+      const currentContentId = activeContentId || getLatestContentId() || undefined;
 
-      if (!currentContentId) {
-        const gateText = "Pilih dan ACC salah satu opsi konten di atas dulu yuk! Setelah itu Sparky siap langsung buatkan video sinematik yang sesuai dengan konsep pilihanmu. 🎬✨";
-        const agentMsg: ChatMessage = { id: agentMsgId, role: "agent", text: gateText, type: "general" };
-        setMessages((prev) => [...prev, agentMsg]);
-        setIsTyping(false);
-
-        if (currentUser && currentThreadId) {
-          saveChatMessageToDb(currentUser.id, currentThreadId, "sparky", gateText, { type: "general" });
-        }
-        return;
-      }
-
-      const approvedMsg = messages.slice().reverse().find(
-        (m) => (m.contentId === currentContentId || m.approvedData?.savedPostId === currentContentId) && m.approvedData
-      );
+      const approvedMsg = currentContentId
+        ? messages.slice().reverse().find(
+            (m) => (m.contentId === currentContentId || m.approvedData?.savedPostId === currentContentId) && m.approvedData
+          )
+        : undefined;
       const approved = approvedMsg?.approvedData;
       const effectiveVidPrompt = approved?.videoPrompt || textToSend;
       const effectiveImgPrompt = approved?.imagePrompt || textToSend;
-      const cleanTopic = approved?.title || textToSend.replace(/^(bikin|buatkan|buat|generate|minta|lanjut)\s+(video|videonya|reel)\s*/i, "").trim() || "Reel Sinematik";
+      const cleanTopic =
+        approved?.title ||
+        textToSend
+          .replace(/^(?:tolong|bisa|coba|mohon|mau|pengen)?\s*(?:bikin|bikinin|buat|buatin|buatkan|generate|produksi|minta|lanjut)?\s*(?:video|vidio|videonya|vidionya|reel|reels|klip|animasi)\s*/i, "")
+          .trim() ||
+        "Reel Sinematik";
 
       let resImg: { imageUrl: string; error?: string } = { imageUrl: "" };
       let resVid: { videoUrl: string; error?: string } = { videoUrl: "" };
@@ -875,12 +888,12 @@ export function IndexPage() {
       const finalMediaUrl = hasValidVid ? resVid.videoUrl : hasValidImg ? resImg.imageUrl : "";
 
       if (hasValidVid || hasValidImg) {
-        const agentText = `🎬 **Hasil Produksi Video Reel (Google Veo 3.1)**:\n\n` +
+        const agentText = `🎬 **Hasil Produksi Video Reel (${hasValidVid ? "Google Veo 3.1" : "Visual Sinematik 9:16 HD"})**:\n\n` +
           `📹 **Konsep Scene Script 8-Detik**:\n` +
           `• **[0-2s Hook]**: *"Tahukah kamu rahasia dibalik kekuatan ${cleanTopic}?"*\n` +
           `• **[2-5s Visual Utama]**: Kamera melakukan pan sinematik 3D close-up memperlihatkan detail visual ${cleanTopic} secara realistis.\n` +
           `• **[5-8s CTA & Closing]**: Teks overlay "Simpan & Follow untuk info menarik berikutnya!" dengan audio trending.\n\n` +
-          `✨ **Prompt Visual Veo 3.1**: *"Cinematic 8-second vertical 9:16 video: High resolution detailed footage of ${cleanTopic}, 60fps, 35mm lens, studio lighting, smooth motion."*\n\n` +
+          `✨ **Prompt Visual**: *"Cinematic 8-second vertical 9:16 video: High resolution detailed footage of ${cleanTopic}, 60fps, 35mm lens, studio lighting, smooth motion."*\n\n` +
           `👇 Putar video Reel 8-detik di bawah ini:`;
 
         const agentMsg: ChatMessage = {
@@ -951,6 +964,15 @@ export function IndexPage() {
               prompt: effectiveVidPrompt,
               status: "generated"
             }).catch((err) => console.warn("Notice saving standalone video:", err));
+          } else if (hasValidImg) {
+            saveMediaToLibrary(currentUser.id, {
+              post_id: null,
+              media_type: "video",
+              media_url: resImg.imageUrl,
+              title: `Video Reel ${cleanTopic}`,
+              prompt: effectiveImgPrompt,
+              status: "generated"
+            }).catch((err) => console.warn("Notice saving standalone reel visual:", err));
           }
         }
       } else {
