@@ -86,11 +86,11 @@ export function calculateVeoVideoCost(durationSeconds: number) {
  * Built-in Indonesian-to-English Subject Mapping for Visual Generation
  */
 const INDO_TO_EN_SUBJECT_MAP: Record<string, string> = {
-  "kucing berjalan": "A cute realistic fluffy cat gracefully walking forward on green grass",
-  "kucing jalan": "A cute realistic fluffy cat gracefully walking forward on green grass",
-  "kucing lari": "A playful energetic cat running across a sunny lawn",
-  "anjing berjalan": "A friendly playful dog happily walking on a sunny park path",
-  "kelinci berjalan": "A cute fluffy rabbit hopping gently on green lawn",
+  "kucing berjalan": "A cute realistic fluffy cat actively walking forward across green grass, one front paw lifted off the ground in dynamic mid-stride motion, walking across the camera frame",
+  "kucing jalan": "A cute realistic fluffy cat actively walking forward across green grass, one front paw lifted off the ground in dynamic mid-stride motion, walking across the camera frame",
+  "kucing lari": "A playful energetic cat captured running at high speed across a sunny lawn, dynamic athletic stride",
+  "anjing berjalan": "A friendly playful dog happily walking forward on a sunny park path, active walking stride with paws in motion",
+  "kelinci berjalan": "A cute fluffy rabbit actively hopping forward across a green lawn in dynamic hopping motion",
   kelinci: "A realistic cute fluffy rabbit sitting in a lush green garden",
   kucing: "A cute realistic fluffy cat with soft fur and expressive eyes",
   anjing: "A friendly playful domestic dog in a bright park",
@@ -200,12 +200,13 @@ async function resolveSubjectLockedPrompt(
         model: "gemini-3.5-flash-lite",
         contents: [{
           parts: [{
-            text: `You are an expert text-to-image prompt engineer. Convert the user request from Indonesian into an explicit English prompt with STRICT SUBJECT-LOCK.
+            text: `You are an expert text-to-image and text-to-video prompt engineer. Convert the user request from Indonesian into an explicit English prompt with STRICT SUBJECT-LOCK and DYNAMIC ACTION.
 DIRECTIVES:
-1. The very first 3-5 words MUST explicitly name and lock the primary subject (e.g. 'A cute fluffy rabbit...', 'A sleek red sports car...').
-2. NEVER use metaphors, poetry, or vague allegories.
-3. Translate all Indonesian concepts into explicit, literal English.
-4. Output ONLY the English prompt, with NO explanations, quotes, or markdown.
+1. The very first 3-5 words MUST explicitly name and lock the primary subject (e.g. 'A cute fluffy cat actively walking forward...', 'A sleek red sports car cruising...').
+2. DYNAMIC ACTION LOCK: If the user mentions an action like 'berjalan' (walking), 'jalan' (walking), 'lari' (running), 'terbang' (flying), 'melompat' (jumping), the prompt MUST explicitly describe the subject IN FULL STRIDE/DYNAMIC MOTION (e.g. 'one front paw lifted off the ground in mid-stride, actively walking across the frame, dynamic motion blur, animated stride'), NEVER sitting, resting, or in a static posture!
+3. NEVER use metaphors, poetry, or vague allegories.
+4. Translate all Indonesian concepts into explicit, literal English.
+5. Output ONLY the English prompt, with NO explanations, quotes, or markdown.
 
 User request: "${subjectOnly || cleaned}"`
           }]

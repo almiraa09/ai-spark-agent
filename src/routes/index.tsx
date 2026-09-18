@@ -888,13 +888,19 @@ export function IndexPage() {
       const finalMediaUrl = hasValidVid ? resVid.videoUrl : hasValidImg ? resImg.imageUrl : "";
 
       if (hasValidVid || hasValidImg) {
-        const agentText = `🎬 **Hasil Produksi Video Reel (${hasValidVid ? "Google Veo 3.1" : "Visual Sinematik 9:16 HD"})**:\n\n` +
+        const engineTitle = hasValidVid ? "Google Veo 3.1 Neural Video" : "Reel Motion Studio (9:16 HD)";
+        const motionNotice = !hasValidVid
+          ? `\n\n> ℹ️ **Catatan Tipe Video**: Video ini diproduksi dalam format **Reel Motion Studio (Animasi Sinematik 8-Detik)** karena API Key Gemini berada di akun Free Tier. Google Veo 3.1 (video neural gerak penuh di mana AI menggerakkan setiap sendi/langkah subjek) memerlukan billing aktif di Google AI Studio ($0.10/detik). Kamu tetap bisa memutar animasi 8s, mengunduh file MP4, atau menjadwalkannya langsung ke Instagram!`
+          : "";
+
+        const agentText = `🎬 **Hasil Produksi Video Reel (${engineTitle})**:\n\n` +
           `📹 **Konsep Scene Script 8-Detik**:\n` +
           `• **[0-2s Hook]**: *"Tahukah kamu rahasia dibalik kekuatan ${cleanTopic}?"*\n` +
-          `• **[2-5s Visual Utama]**: Kamera melakukan pan sinematik 3D close-up memperlihatkan detail visual ${cleanTopic} secara realistis.\n` +
+          `• **[2-5s Visual Utama]**: Kamera melakukan pergerakan sinematik dinamis memperlihatkan detail visual ${cleanTopic} dalam pose melangkah secara realistis.\n` +
           `• **[5-8s CTA & Closing]**: Teks overlay "Simpan & Follow untuk info menarik berikutnya!" dengan audio trending.\n\n` +
-          `✨ **Prompt Visual**: *"Cinematic 8-second vertical 9:16 video: High resolution detailed footage of ${cleanTopic}, 60fps, 35mm lens, studio lighting, smooth motion."*\n\n` +
-          `👇 Putar video Reel 8-detik di bawah ini:`;
+          `✨ **Prompt Visual**: *"Cinematic 8-second vertical 9:16 video: High resolution detailed footage of ${cleanTopic}, active forward motion, studio lighting, smooth motion."*` +
+          motionNotice +
+          `\n\n👇 Putar video Reel 8-detik di bawah ini:`;
 
         const agentMsg: ChatMessage = {
           id: agentMsgId,
@@ -1754,19 +1760,7 @@ export function IndexPage() {
                         {message.type === "video_card" && (message.videoUrl || message.imageUrl) && (
                           <div className="mt-4 overflow-hidden rounded-2xl border border-blue-200 dark:border-blue-800 bg-slate-900/5 dark:bg-slate-900 p-3 shadow-md">
                             <div className="relative aspect-[9/16] max-w-[240px] mx-auto overflow-hidden rounded-2xl bg-slate-950 border border-border/80 shadow-2xl group">
-                              {message.imageUrl ? (
-                                <div className="relative w-full h-full overflow-hidden">
-                                  <img
-                                    src={message.imageUrl}
-                                    alt="Google Veo 3.1 Visual Reel"
-                                    className="w-full h-full object-cover transform scale-105 transition-transform duration-10000 ease-in-out hover:scale-110"
-                                  />
-                                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30" />
-                                  <div className="absolute top-2 right-2 bg-red-600/90 text-white text-[9px] font-extrabold px-2 py-0.5 rounded-full shadow flex items-center gap-1">
-                                    <span className="size-1.5 rounded-full bg-white animate-ping" /> 00:08 Reel HD
-                                  </div>
-                                </div>
-                              ) : (
+                              {message.videoUrl ? (
                                 <video
                                   src={message.videoUrl}
                                   controls
@@ -1776,7 +1770,19 @@ export function IndexPage() {
                                   playsInline
                                   className="w-full h-full object-cover rounded-xl"
                                 />
-                              )}
+                              ) : message.imageUrl ? (
+                                <div className="relative w-full h-full overflow-hidden">
+                                  <img
+                                    src={message.imageUrl}
+                                    alt={message.topicTitle || "Reel Visual"}
+                                    className="w-full h-full object-cover transform scale-105 transition-transform duration-10000 ease-in-out hover:scale-110"
+                                  />
+                                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/30" />
+                                  <div className="absolute top-2 right-2 bg-red-600/90 text-white text-[9px] font-extrabold px-2 py-0.5 rounded-full shadow flex items-center gap-1">
+                                    <span className="size-1.5 rounded-full bg-white animate-ping" /> 00:08 Reel HD
+                                  </div>
+                                </div>
+                              ) : null}
                               <div className="pointer-events-none absolute inset-x-3 top-10 z-10 rounded-xl bg-black/65 backdrop-blur-md p-2.5 text-center text-white border border-white/20 shadow-md">
                                 <span className="inline-block bg-blue-600 text-[8px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full text-white mb-1">Reel Text Hook</span>
                                 <p className="text-[11px] font-extrabold leading-tight text-white drop-shadow-md">
@@ -1786,7 +1792,7 @@ export function IndexPage() {
                             </div>
                             <div className="mt-3 flex flex-wrap items-center justify-between gap-2 px-1">
                               <span className="text-[10px] text-muted-foreground font-semibold flex items-center gap-1">
-                                <Sparkles className="size-3 text-blue-600" /> Google Veo 3.1 Video Engine (9:16 HD Reel)
+                                <Sparkles className="size-3 text-blue-600" /> {message.videoUrl ? "Google Veo 3.1 Video Engine (9:16 HD Reel)" : "Reel Motion Studio 8s (9:16 HD)"}
                               </span>
                               <div className="flex flex-wrap items-center gap-1.5">
                                 <Button
