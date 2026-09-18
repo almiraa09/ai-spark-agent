@@ -1,5 +1,5 @@
 import { generateContentPlanWithAI, GeneratedContentPlan, callGeminiApi } from "./gemini";
-import { calculateVeoVideoCost } from "./media-services";
+import { calculateVeoVideoCost, sanitizeVisualPrompt } from "./media-services";
 import { savePostToDb, supabase, ContentPostItem, getTodayLocalDateString } from "../lib/supabase";
 
 export interface TopicRatio {
@@ -363,6 +363,8 @@ export async function approveAndGenerateContent(
   const veoCost = calculateVeoVideoCost(durationSec);
 
   const todayStr = getTodayLocalDateString();
+  const sanitizedImgPrompt = sanitizeVisualPrompt(plan.imagePrompt, "image");
+  const sanitizedVidPrompt = sanitizeVisualPrompt(plan.videoPrompt, "video");
 
   const postData: Partial<ContentPostItem> = {
     ...(existingPostId ? { id: existingPostId } : {}),
@@ -372,8 +374,8 @@ export async function approveAndGenerateContent(
     script: plan.script,
     caption: plan.caption,
     hashtags: plan.hashtags,
-    image_prompt: plan.imagePrompt,
-    video_prompt: plan.videoPrompt,
+    image_prompt: sanitizedImgPrompt,
+    video_prompt: sanitizedVidPrompt,
     veo_duration_seconds: durationSec,
     veo_cost_usd: veoCost.costUSD,
     veo_cost_idr: veoCost.costIDR,
@@ -391,8 +393,8 @@ export async function approveAndGenerateContent(
     script: plan.script,
     caption: plan.caption,
     hashtags: plan.hashtags,
-    imagePrompt: plan.imagePrompt,
-    videoPrompt: plan.videoPrompt,
+    imagePrompt: sanitizedImgPrompt,
+    videoPrompt: sanitizedVidPrompt,
     veoDurationSeconds: durationSec,
     veoCostUSD: veoCost.costUSD,
     veoCostIDR: veoCost.costIDR,
@@ -440,7 +442,11 @@ ATURAN REVISI:
    - Contoh: Jika pengguna hanya minta "buat caption lebih pendek" atau "ganti caption", ubah HANYA caption. Skrip dan judul TETAP SAMA PERSIS.
    - Contoh: Jika pengguna minta "revisi script scene 2", ubah bagian skrip yang relevan. Caption dan judul TETAP SAMA PERSIS.
    - Contoh: Jika pengguna minta "ubah judul jadi lebih santai", ubah HANYA judul. Bagian lain TETAP SAMA PERSIS.
-3. Kembalikan respons dalam format JSON valid berikut tanpa pembungkus markdown apapun di luar JSON:
+3. VISUAL GUARDRAILS UNTUK PROMPT MEDIA (imagePrompt & videoPrompt):
+   - Wajib Bahasa Inggris eksplisit & literal dengan Subject-Lock di kalimat pertama tanpa metafora (misal: 'A realistic elephant in...').
+   - Komposisi terpusat (centered subject, wide shot / medium shot, clear margins, full body visible in frame, no cropped limbs, no text overlay).
+   - Video motion sederhana dan stabil (smooth fluid motion, steady camera angle, 24fps look, subtle movement).
+4. Kembalikan respons dalam format JSON valid berikut tanpa pembungkus markdown apapun di luar JSON:
 {
   "title": "judul konten",
   "concept": "konsep/angle",
@@ -468,8 +474,8 @@ ATURAN REVISI:
         script: String(parsed.script || currentContent.script),
         caption: String(parsed.caption || currentContent.caption),
         hashtags: Array.isArray(parsed.hashtags) ? parsed.hashtags : (currentContent.hashtags || []),
-        image_prompt: parsed.imagePrompt || currentContent.image_prompt,
-        video_prompt: parsed.videoPrompt || currentContent.video_prompt,
+        image_prompt: parsed.imagePrompt ? sanitizeVisualPrompt(parsed.imagePrompt, "image") : currentContent.image_prompt,
+        video_prompt: parsed.videoPrompt ? sanitizeVisualPrompt(parsed.videoPrompt, "video") : currentContent.video_prompt,
         summaryOfChanges: String(parsed.summaryOfChanges || "Perubahan telah berhasil diterapkan pada konten.")
       };
     }

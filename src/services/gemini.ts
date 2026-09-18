@@ -1,3 +1,5 @@
+import { sanitizeVisualPrompt } from "./media-services";
+
 /**
  * Gemini API Integration Service for InstaSpark AI Helper (Mira)
  * Handles reasoning, script writing, caption generation, trend research, and AI performance analysis.
@@ -91,8 +93,15 @@ export async function callGeminiApi(options: GeminiRequestOptions): Promise<stri
 }
 
 export async function generateContentPlanWithAI(topicOrGoal: string): Promise<GeneratedContentPlan> {
-  const systemPrompt = `You are Sparky, an expert autonomous Instagram Marketing AI Agent. Create a comprehensive Instagram content plan for the given goal or topic. Return responses in valid JSON format.`;
-  const userPrompt = `Create an Instagram content plan for: "${topicOrGoal}". Return a JSON object with keys: concept, script, caption, hashtags (array), imagePrompt, videoPrompt, recommendedPostTime, abTestingVariations (array of 2 strings).`;
+  const systemPrompt = `You are Sparky, an expert autonomous Instagram Marketing AI Agent. Create a comprehensive Instagram content plan for the given goal or topic. Return responses in valid JSON format.
+
+# VISUAL GUARDRAIL & PROMPT SANITIZER DIRECTIVES (STRICT):
+1. SUBJECT-LOCK: The primary subject must be explicitly locked in the very first sentence of imagePrompt and videoPrompt (e.g. 'A realistic elephant in...', 'A barista pouring latte art...'). Do NOT use metaphors, poetry, or vague allegories (e.g. do not use words like 'kingdom' when depicting animals). Always translate Indonesian concepts into explicit, literal English.
+2. FRAMING & COMPOSITION: Require centered subject, wide shot / medium shot, clear margins, full body visible in frame, smooth motion. Avoid extreme scale like 'extreme close-up' that causes cropping or overzooming.
+3. VIDEO STABILITY & CONTINUITY: For videoPrompt, describe simple, realistic actions (e.g. 'slowly walking forward', 'subtle movement', 'natural lighting change', 'smooth fluid motion'). Never use complex acrobatics or multiple conflicting camera moves.`;
+
+  const userPrompt = `Create an Instagram content plan for: "${topicOrGoal}". Return a JSON object with keys: concept, script, caption, hashtags (array), imagePrompt, videoPrompt, recommendedPostTime, abTestingVariations (array of 2 strings).
+Ensure imagePrompt and videoPrompt strictly follow the VISUAL GUARDRAIL DIRECTIVES above.`;
 
   const rawOutput = await callGeminiApi({
     prompt: userPrompt,
@@ -103,7 +112,14 @@ export async function generateContentPlanWithAI(topicOrGoal: string): Promise<Ge
   try {
     const jsonMatch = rawOutput.match(/\{[\s\S]*\}/);
     if (jsonMatch) {
-      return JSON.parse(jsonMatch[0]) as GeneratedContentPlan;
+      const plan = JSON.parse(jsonMatch[0]) as GeneratedContentPlan;
+      if (plan.imagePrompt) {
+        plan.imagePrompt = sanitizeVisualPrompt(plan.imagePrompt, "image");
+      }
+      if (plan.videoPrompt) {
+        plan.videoPrompt = sanitizeVisualPrompt(plan.videoPrompt, "video");
+      }
+      return plan;
     }
   } catch {
     // Fallback if parsing fails
@@ -114,8 +130,8 @@ export async function generateContentPlanWithAI(topicOrGoal: string): Promise<Ge
     script: `[Scene 1: Hook] "Tahukah kamu rahasia berkembang cepat di Instagram saat ini?"\n[Scene 2: Problem] "Banyak brand fokus pada kuantitas tanpa cerita yang kuat."\n[Scene 3: Solution] "Gunakan 3 pilar ini untuk meriset audiens dan membuat konten berefek tinggi."\n[Scene 4: Call To Action] "Simpan postingan ini dan coba minggu ini!"`,
     caption: `Mau akun Instagram brand kamu tumbuh lebih organik bulan ini? 🚀\n\nKuncinya bukan cuma posting tiap hari, tapi menghadirkan cerita yang otentik dan solutif bagi audiens kamu.\n\nSimpan postingan ini untuk panduan strategi berikutnya! ✨`,
     hashtags: ["#InstagramMarketing", "#ContentStrategy", "#BuildInPublic", "#DigitalMarketing", "#GrowthHacking"],
-    imagePrompt: "Minimalist studio setup with clean aesthetic lighting, social media analytics graph on laptop screen, warm tone, 4k quality",
-    videoPrompt: "Dynamic 8-second cinematic reel showing creative workflow, high-resolution 720p 60fps, smooth camera pan over design workspace",
+    imagePrompt: sanitizeVisualPrompt("A realistic professional workstation with clean aesthetic lighting, social media analytics graph on laptop screen, centered subject, medium shot", "image"),
+    videoPrompt: sanitizeVisualPrompt("A creative professional working at a modern desk, subtle camera pan forward, natural morning sunlight, smooth motion", "video"),
     recommendedPostTime: "Jumat, 18:00 WIB",
     abTestingVariations: [
       "Variasi A (Hook Emosional): 'Jangan posting di Instagram sebelum tahu 3 hal ini!'",

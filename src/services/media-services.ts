@@ -83,6 +83,42 @@ export function calculateVeoVideoCost(durationSeconds: number) {
 }
 
 /**
+ * Visual Guardrail & Prompt Sanitizer (Strict)
+ * Enforces Subject-Lock, Framing & Composition, and Video Stability & Continuity.
+ */
+export function sanitizeVisualPrompt(userPrompt: string, mediaType: "image" | "video"): string {
+  let cleaned = (userPrompt || "").trim();
+
+  // If already sanitized, strip previous "Visual constraints:" suffix before re-applying
+  if (cleaned.includes("Visual constraints:")) {
+    cleaned = cleaned.split("Visual constraints:")[0].trim();
+  }
+
+  // Framing & Composition Guardrail: Replace extreme close-ups causing zoom/crop issues
+  cleaned = cleaned.replace(/\bextreme close[- ]?up\b/gi, "medium shot with clear margins");
+  cleaned = cleaned.replace(/\bmacro close[- ]?up\b/gi, "centered medium shot");
+
+  // Ensure clean punctuation before appending visual constraints
+  if (cleaned.endsWith(".")) {
+    cleaned = cleaned.slice(0, -1).trim();
+  }
+
+  const basePrompt = cleaned || "High quality Instagram marketing visual";
+
+  // Lock subject and framing (Subject-Lock & Framing Directives)
+  const baseRules =
+    "Photorealistic, centered framing, high resolution, complete subject inside the camera frame, no cropped limbs, no text overlay, centered subject, wide shot / medium shot, clear margins, full body visible in frame.";
+
+  // Video Stability & Continuity (Movement Directives)
+  const motionRules =
+    mediaType === "video"
+      ? "smooth fluid motion, steady camera angle, 24fps look, subtle movement, natural lighting change."
+      : "";
+
+  return `${basePrompt}. Visual constraints: ${baseRules} ${motionRules}`.replace(/\s+/g, " ").trim();
+}
+
+/**
  * Server Function for Media Generation (TanStack Start RPC bridge)
  * Strictly executed on the server.
  * Uses Google GenAI SDK (@google/genai) with process.env.GEMINI_API_KEY.
@@ -119,6 +155,9 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
 
     const ai = new GoogleGenAI({ apiKey: serverKey });
 
+    // 3. Enforce Visual Guardrail & Prompt Sanitizer on all prompts
+    const sanitizedPrompt = sanitizeVisualPrompt(data.prompt, data.mediaType);
+
     if (data.mediaType === "video") {
       // ==========================================
       // REAL VIDEO GENERATION (Google Veo 3.1)
@@ -132,7 +171,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
         let operation = await ai.models.generateVideos({
           model: "veo-3.1-generate-preview",
           source: {
-            prompt: data.prompt,
+            prompt: sanitizedPrompt,
           },
           config: {
             aspectRatio: "9:16",
@@ -201,7 +240,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
           media_type: "video",
           media_url: publicUrl,
           title: data.topicTitle ? `Video Reel ${data.topicTitle}` : "Video Reel",
-          prompt: data.prompt,
+          prompt: sanitizedPrompt,
           status: "generated"
         }]);
 
@@ -246,7 +285,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
         console.log(`[Nano Banana Server] Requesting image generation with gemini-3.1-flash-image for post ${data.contentId}...`);
         const imgRes = await ai.models.generateContent({
           model: "gemini-3.1-flash-image",
-          contents: data.prompt,
+          contents: sanitizedPrompt,
           config: {
             imageConfig: {
               aspectRatio: data.aspectRatio || "4:5",
@@ -299,7 +338,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
           media_type: "image",
           media_url: publicUrl,
           title: data.topicTitle ? `Gambar ${data.topicTitle}` : "Visual Gambar",
-          prompt: data.prompt,
+          prompt: sanitizedPrompt,
           status: "generated"
         }]);
 
@@ -334,6 +373,7 @@ export const generateMediaServerFn = createServerFn({ method: "POST" })
   });
 
 export async function generateVeoVideo(request: VideoGenRequest): Promise<VideoGenResponse> {
+  const sanitizedPrompt = sanitizeVisualPrompt(request.prompt, "video");
   const duration = request.durationSeconds || 8;
   const cost = calculateVeoVideoCost(duration);
 
@@ -342,7 +382,7 @@ export async function generateVeoVideo(request: VideoGenRequest): Promise<VideoG
       data: {
         contentId: request.contentId || "pending-content",
         mediaType: "video",
-        prompt: request.prompt,
+        prompt: sanitizedPrompt,
         durationSeconds: duration,
         resolution: request.resolution || "720p",
         topicTitle: request.topicTitle,
@@ -560,12 +600,13 @@ export async function triggerDirectDownload(url: string, filename: string = "nan
 }
 
 export async function generateNanoBananaImage(request: ImageGenRequest): Promise<ImageGenResponse> {
+  const sanitizedPrompt = sanitizeVisualPrompt(request.prompt, "image");
   try {
     const serverRes = await generateMediaServerFn({
       data: {
         contentId: request.contentId || "pending-content",
         mediaType: "image",
-        prompt: request.prompt,
+        prompt: sanitizedPrompt,
         aspectRatio: request.aspectRatio || "4:5",
         topicTitle: request.topicTitle,
         userId: request.userId
@@ -590,3 +631,20 @@ export async function generateNanoBananaImage(request: ImageGenRequest): Promise
     };
   }
 }
+
+/**
+ * Generate Image with automatic Visual Guardrail & Prompt Sanitizer
+ */
+export async function generateImage(request: ImageGenRequest | string): Promise<ImageGenResponse> {
+  const reqObj: ImageGenRequest = typeof request === "string" ? { prompt: request, aspectRatio: "4:5" } : request;
+  return generateNanoBananaImage(reqObj);
+}
+
+/**
+ * Generate Video with automatic Visual Guardrail & Prompt Sanitizer
+ */
+export async function generateVideo(request: VideoGenRequest | string): Promise<VideoGenResponse> {
+  const reqObj: VideoGenRequest = typeof request === "string" ? { prompt: request, durationSeconds: 8, resolution: "720p" } : request;
+  return generateVeoVideo(reqObj);
+}
+
