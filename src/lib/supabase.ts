@@ -1,4 +1,5 @@
 import { createClient, SupabaseClient, type User } from "@supabase/supabase-js";
+import { registerUserServerFn, checkUserExistsServerFn, syncAccountToSupabaseServerFn } from "@/services/auth-server";
 
 /**
  * Supabase Client Helper for InstaSpark AI Helper
@@ -209,70 +210,81 @@ export async function signUpWithEmail(email: string, pass: string, name: string)
     return { user: null, error: "Mohon isi alamat email dan kata sandi." };
   }
 
-  const accounts = getRegisteredAccounts();
-  const existingLocalAccount = accounts[cleanEmail];
-
-  // If email is ALREADY registered: BLOCK signup!
-  if (existingLocalAccount) {
-    return {
-      user: null,
-      error: `ALREADY_REGISTERED: Email "${cleanEmail}" sudah terdaftar! Silakan klik tab 'Masuk' untuk login.`
-    };
-  }
-
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.auth.signUp({
+  // 1. Register User via Server Function (uses SUPABASE_SERVICE_ROLE_KEY with email_confirm: true)
+  // This completely eliminates email SMTP rate limits and makes the user immediately active across all devices.
+  try {
+    const res = await registerUserServerFn({
+      data: {
         email: cleanEmail,
-        password: pass,
-        options: {
-          data: { full_name: name }
-        }
-      });
-
-      if (error) {
-        const isAlreadyRegistered =
-          error.message.toLowerCase().includes("already registered") ||
-          error.message.toLowerCase().includes("already exists") ||
-          error.code === "user_already_exists";
-
-        if (isAlreadyRegistered) {
-          return {
-            user: null,
-            error: `ALREADY_REGISTERED: Email "${cleanEmail}" sudah terdaftar! Silakan klik tab 'Masuk' untuk login.`
-          };
-        }
+        pass,
+        name: name || cleanEmail.split("@")[0]
       }
+    });
 
-      if (data?.user) {
-        if (data.user.identities && data.user.identities.length === 0) {
-          return {
-            user: null,
-            error: `ALREADY_REGISTERED: Email "${cleanEmail}" sudah terdaftar! Silakan klik tab 'Masuk' untuk login.`
-          };
-        }
-
-        const u: UserSession = {
-          id: data.user.id,
-          email: data.user.email || cleanEmail,
-          name: name || cleanEmail.split("@")[0]
+    if (!res.success) {
+      if (res.code === "ALREADY_REGISTERED") {
+        return {
+          user: null,
+          error: `ALREADY_REGISTERED: Email "${cleanEmail}" sudah terdaftar! Silakan klik tab 'Masuk' untuk login.`
         };
-        saveRegisteredAccount({
-          id: data.user.id,
-          email: cleanEmail,
-          pass,
-          name: u.name
-        });
-        setLocalItem(LOCAL_USER_KEY, JSON.stringify(u));
-        migrateLegacyUserData(cleanEmail, u.id);
-        return { user: u };
       }
-    } catch (err: any) {
-      console.warn("Supabase signup exception:", err);
+      return {
+        user: null,
+        error: res.error || "Gagal membuat akun."
+      };
     }
+
+    // 2. Immediately sign in with Supabase Auth to establish the real client session token
+    if (supabase) {
+      try {
+        const { data: signData } = await supabase.auth.signInWithPassword({
+          email: cleanEmail,
+          password: pass
+        });
+
+        if (signData?.user) {
+          const u: UserSession = {
+            id: signData.user.id,
+            email: signData.user.email || cleanEmail,
+            name: name || cleanEmail.split("@")[0]
+          };
+          saveRegisteredAccount({
+            id: signData.user.id,
+            email: cleanEmail,
+            pass,
+            name: u.name
+          });
+          setLocalItem(LOCAL_USER_KEY, JSON.stringify(u));
+          migrateLegacyUserData(cleanEmail, u.id);
+          return { user: u };
+        }
+      } catch (signErr) {
+        console.warn("Post-signup signIn notice:", signErr);
+      }
+    }
+
+    // If client signIn hasn't resolved yet, return the registered user info from server
+    if (res.user) {
+      const u: UserSession = {
+        id: res.user.id,
+        email: cleanEmail,
+        name: res.user.name
+      };
+      saveRegisteredAccount({
+        id: res.user.id,
+        email: cleanEmail,
+        pass,
+        name: u.name
+      });
+      setLocalItem(LOCAL_USER_KEY, JSON.stringify(u));
+      migrateLegacyUserData(cleanEmail, u.id);
+      return { user: u };
+    }
+  } catch (err: any) {
+    console.warn("Server registration call failed:", err);
   }
 
-  // Register new local account deterministically
+  // Fallback if server call fails entirely
   const deterministicId = getDeterministicUserId(cleanEmail);
   const newAcc: RegisteredAccount = {
     id: deterministicId,
@@ -298,7 +310,7 @@ export async function signInWithEmail(email: string, pass: string): Promise<{ us
     return { user: null, error: "Mohon isi alamat email dan kata sandi." };
   }
 
-  // 1. Try Supabase auth FIRST if available so every device uses the same Supabase User ID
+  // 1. Try Supabase cloud auth FIRST so every device authenticates against the same database
   if (supabase) {
     try {
       const { data, error } = await supabase.auth.signInWithPassword({
@@ -322,12 +334,59 @@ export async function signInWithEmail(email: string, pass: string): Promise<{ us
         migrateLegacyUserData(cleanEmail, u.id);
         return { user: u };
       }
+
+      // If invalid credentials, check if it's an un-synced local account from before
+      const accounts = getRegisteredAccounts();
+      const existingLocal = accounts[cleanEmail];
+      if (existingLocal && existingLocal.pass === pass) {
+        try {
+          const syncRes = await syncAccountToSupabaseServerFn({
+            data: {
+              email: cleanEmail,
+              pass,
+              name: existingLocal.name
+            }
+          });
+          if (syncRes.synced) {
+            const retry = await supabase.auth.signInWithPassword({
+              email: cleanEmail,
+              password: pass
+            });
+            if (retry.data?.user) {
+              const u: UserSession = {
+                id: retry.data.user.id,
+                email: cleanEmail,
+                name: existingLocal.name
+              };
+              setLocalItem(LOCAL_USER_KEY, JSON.stringify(u));
+              migrateLegacyUserData(cleanEmail, u.id);
+              return { user: u };
+            }
+          }
+        } catch (syncErr) {
+          console.warn("Auto-sync error:", syncErr);
+        }
+      }
     } catch (err: any) {
       console.warn("Supabase signin exception:", err);
     }
   }
 
-  // 2. Local registry check as fallback
+  // 2. Check if user exists in Supabase cloud (e.g. registered from another device)
+  try {
+    const existsRes = await checkUserExistsServerFn({ data: { email: cleanEmail } });
+    if (existsRes.exists) {
+      // User definitely exists in cloud, so invalid password
+      return {
+        user: null,
+        error: "Kata sandi salah. Silakan periksa kembali kata sandi Anda."
+      };
+    }
+  } catch (err) {
+    console.warn("checkUserExistsServerFn call notice:", err);
+  }
+
+  // 3. Local registry check as fallback
   const accounts = getRegisteredAccounts();
   const existingLocalAccount = accounts[cleanEmail];
 
@@ -349,11 +408,39 @@ export async function signInWithEmail(email: string, pass: string): Promise<{ us
     }
   }
 
-  // Email is NOT registered: REJECT signin
+  // Email is NOT registered anywhere: REJECT signin
   return {
     user: null,
     error: `UNREGISTERED_EMAIL: Akun dengan email "${cleanEmail}" belum terdaftar. Silakan buat akun di tab 'Daftar Baru'.`
   };
+}
+
+/**
+ * Background helper to sync any local accounts into Supabase cloud
+ */
+export async function syncAllLocalAccountsToSupabase(): Promise<void> {
+  if (typeof window === "undefined") return;
+  try {
+    const accounts = getRegisteredAccounts();
+    for (const [email, acc] of Object.entries(accounts)) {
+      if (email === "airaz@gmail.com") continue;
+      if (acc.email && acc.pass) {
+        await syncAccountToSupabaseServerFn({
+          data: {
+            email: acc.email,
+            pass: acc.pass,
+            name: acc.name
+          }
+        }).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+if (typeof window !== "undefined") {
+  setTimeout(() => {
+    syncAllLocalAccountsToSupabase();
+  }, 2000);
 }
 
 export async function signOutUser(): Promise<void> {
